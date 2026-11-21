@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acme Studio — test page</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, system-ui, sans-serif; color: #0f172a; background: #f8fafc; }
+  header { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 40px; background: #fff; border-bottom: 1px solid #e2e8f0; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+  .logo-mark { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #6366f1, #06b6d4); }
+  nav { display: flex; gap: 22px; }
+  nav a { color: #334155; text-decoration: none; font-size: 15px; }
+  .btn { display: inline-block; padding: 10px 18px; border-radius: 10px; background: #0f172a; color: #fff; text-decoration: none; font-size: 15px; border: 0; }
+  .btn.ghost { background: transparent; color: #0f172a; border: 1px solid #cbd5e1; }
+  .hero { display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center; padding: 72px 40px 56px; max-width: 1200px; margin: 0 auto; }
+  .hero h1 { font-size: 52px; line-height: 1.05; margin: 0 0 18px; letter-spacing: -1px; }
+  .hero p { font-size: 18px; color: #475569; margin: 0 0 28px; max-width: 520px; }
+  .cta { display: flex; gap: 12px; }
+  .art { height: 340px; border-radius: 24px; background: linear-gradient(160deg, #c7d2fe, #a5f3fc); position: relative; overflow: hidden; }
+  .art .blob { position: absolute; width: 140px; height: 140px; border-radius: 50%; background: rgba(255,255,255,.6); left: 40px; top: 50px; }
+  .art .card { position: absolute; right: 36px; bottom: 36px; width: 180px; height: 110px; border-radius: 16px; background: #fff; box-shadow: 0 10px 30px rgba(15,23,42,.15); }
+  .features { max-width: 1200px; margin: 0 auto; padding: 24px 40px 64px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .feature { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; }
+  .feature .icon { width: 44px; height: 44px; border-radius: 12px; background: #eef2ff; margin-bottom: 14px; }
+  .feature h3 { margin: 0 0 6px; font-size: 18px; }
+  .feature p { margin: 0; color: #64748b; font-size: 15px; }
+  .team { max-width: 1200px; margin: 0 auto; padding: 0 40px 64px; }
+  .avatars { display: flex; gap: 14px; }
+  .avatar { width: 56px; height: 56px; border-radius: 50%; background: #e2e8f0; border: 3px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+  .avatar:nth-child(2) { background: #fde68a; } .avatar:nth-child(3) { background: #bbf7d0; } .avatar:nth-child(4) { background: #fecaca; }
+  .scroller { max-width: 1200px; margin: 0 auto 64px; padding: 0 40px; }
+  .list { height: 180px; overflow: auto; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+  .list div { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; }
+  .pricing { max-width: 1200px; margin: 0 auto; padding: 0 40px 80px; display: flex; gap: 20px; }
+  .plan { flex: 1; background: #fff; border-radius: 16px; border: 1px solid #e2e8f0; padding: 28px; min-height: 260px; }
+  .plan.pro { background: #0f172a; color: #fff; }
+  footer { padding: 40px; background: #0f172a; color: #94a3b8; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><div class="logo-mark"></div><span>Acme Studio</span></div>
+  <nav><a href="#">Product</a><a href="#">Pricing</a><a href="#">Customers</a><a href="#">Docs</a></nav>
+  <a class="btn" href="#">Get started</a>
+</header>
+<section class="hero">
+  <div>
+    <h1>Design faster with fewer meetings</h1>
+    <p>Acme Studio turns rough sketches into polished screens so your team can ship the right thing the first time.</p>
+    <div class="cta"><a class="btn" href="#">Start free</a><a class="btn ghost" href="#">Book a demo</a></div>
+  </div>
+  <div class="art"><div class="blob"></div><div class="card"></div></div>
+</section>
+<section class="features">
+  <div class="feature"><div class="icon"></div><h3>Live layouts</h3><p>See every change on real screen sizes as you make it.</p></div>
+  <div class="feature"><div class="icon"></div><h3>Smart spacing</h3><p>Consistent gaps and alignment without fiddling.</p></div>
+  <div class="feature"><div class="icon"></div><h3>Hand-off</h3><p>Exact sizes your developers can copy straight into code.</p></div>
+</section>
+<section class="team">
+  <h2>The team</h2>
+  <div class="avatars"><div class="avatar"></div><div class="avatar"></div><div class="avatar"></div><div class="avatar"></div></div>
+</section>
+<section class="scroller">
+  <h2>Changelog</h2>
+  <div class="list">
+    <div>v2.4 — Faster exports</div><div>v2.3 — Dark mode</div><div>v2.2 — Comments</div><div>v2.1 — Shared libraries</div>
+    <div>v2.0 — New editor</div><div>v1.9 — Grids</div><div>v1.8 — Plugins</div><div>v1.7 — Offline mode</div>
+  </div>
+</section>
+<section class="pricing">
+  <div class="plan"><h3>Starter</h3><p>Free forever</p></div>
+  <div class="plan pro"><h3>Pro</h3><p>$12 / editor / month</p></div>
+  <div class="plan"><h3>Team</h3><p>$29 / editor / month</p></div>
+</section>
+<footer><span>© Acme Studio</span><span>Made for the test suite</span></footer>
+</body>
+</html>

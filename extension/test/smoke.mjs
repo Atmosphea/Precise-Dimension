@@ -1,0 +1,27 @@
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { serve, launch, pdWorld, sleep } from './lib.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const out = path.join(here, '../test-output');
+await fs.mkdir(out, { recursive: true });
+const { server, url } = await serve(path.join(here, 'pages'));
+const { browser, ext } = await launch(path.join(here, '../build'));
+const page = await browser.newPage();
+const logs = [];
+page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
+page.on('pageerror', (e) => logs.push('[pageerror] ' + e.message));
+await page.goto(url, { waitUntil: 'load' });
+const world = await pdWorld(page);
+await ext.triggerAction(page);
+await sleep(350);
+await page.screenshot({ path: path.join(out, 'smoke-0350ms.png') });
+await sleep(1600);
+await page.screenshot({ path: path.join(out, 'smoke-open.png') });
+const st = await world.eval(`JSON.stringify({ open: __PD__.app.state.open, cands: __PD__.app.cands.length, unit: __PD__.app.state.unit, collectMs: Math.round(__PD__.app.collectMs) })`);
+console.log('state', st);
+console.log('logs', logs.join('\n'));
+console.log('exceptions', JSON.stringify(world.errors.map((e) => e.exception && e.exception.description), null, 1));
+await browser.close();
+server.close();

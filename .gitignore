@@ -25,3 +25,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# browser extension (extension/build is kept so it can be loaded without building)
+/extension/node_modules
+/extension/build-test
+/extension/test-output
+.DS_Store
