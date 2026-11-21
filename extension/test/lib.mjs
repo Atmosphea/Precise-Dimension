@@ -11,6 +11,8 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 
 export async function serve(dir) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
+    const delay = +url.searchParams.get('delay') || 0; // slow files, like images on a real site
+    if (delay) await sleep(delay);
     let p = path.join(dir, decodeURIComponent(url.pathname));
     if (p.endsWith('/')) p += 'index.html';
     try {
@@ -26,14 +28,18 @@ export async function serve(dir) {
   return { server, url: `http://127.0.0.1:${server.address().port}/` };
 }
 
-export async function launch(extDir, { width = 1280, height = 800, headless = true } = {}) {
+// dpr: run the whole browser at that screen density (like a retina or phone screen). Only setting
+// it on a page is not enough for screenshots: Chrome's own capture ignores that setting.
+export async function launch(extDir, { width = 1280, height = 800, headless = true, dpr = 1 } = {}) {
+  const args = [`--window-size=${width},${height + 100}`, '--host-resolver-rules=MAP insecure.test 127.0.0.1'];
+  if (dpr !== 1) args.push(`--force-device-scale-factor=${dpr}`);
   const browser = await puppeteer.launch({
     headless,
     pipe: true,
     enableExtensions: [extDir],
-    defaultViewport: { width, height, deviceScaleFactor: 1 },
+    defaultViewport: { width, height, deviceScaleFactor: dpr },
     // insecure.test → this machine, to try pages that count as "not secure" (plain http)
-    args: [`--window-size=${width},${height + 100}`, '--host-resolver-rules=MAP insecure.test 127.0.0.1'],
+    args,
   });
   let ext = null;
   for (let i = 0; i < 50 && !ext; i++) {

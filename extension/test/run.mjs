@@ -6,6 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { serve, launch, pdWorld, sleep, uiRect, clickUI, drag, rectOfPage } from './lib.mjs';
+import { decodePng } from './png.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(here, '../test-output');
@@ -23,12 +24,28 @@ function check(name, ok, detail = '') {
 const near = (a, b, tol = 1.5) => Math.abs(a - b) <= tol;
 
 const { server, url } = await serve(path.join(here, 'pages'));
-const { browser, ext } = await launch(path.join(here, '../build'));
+let { browser, ext } = await launch(path.join(here, '../build'));
+
+// Runs fn in a separate browser at another screen density (retina, phones), then puts the usual
+// one back. Setting the density on a page only is not enough: Chrome's capture ignores it.
+async function atDensity(dpr, fn) {
+  if (dpr === 1) return fn();
+  const prev = { browser, ext };
+  ({ browser, ext } = await launch(path.join(here, '../build'), { dpr }));
+  try {
+    const cdp = await browser.target().createCDPSession();
+    await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DL, eventsEnabled: true });
+    return await fn();
+  } finally {
+    await browser.close();
+    ({ browser, ext } = prev);
+  }
+}
 export { ext };
 
-async function setup(target = url, { width = 1280, height = 800, before } = {}) {
+async function setup(target = url, { width = 1280, height = 800, dpr = 1, before } = {}) {
   const page = await browser.newPage();
-  await page.setViewport({ width, height, deviceScaleFactor: 1 });
+  await page.setViewport({ width, height, deviceScaleFactor: dpr });
   if (before) await before(page);
   const logs = [];
   page.on('console', (m) => {
@@ -639,6 +656,362 @@ async function captureScenario() {
   await page.close();
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// The opening wave: pictures along the way (look at them), and it has to finish cleanly.
+
+async function waveScenario() {
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
+  await page.goto(url, { waitUntil: 'load' });
+  await page.bringToFront();
+  const world = await pdWorld(page);
+  const t0 = Date.now();
+  await ext.triggerAction(page);
+  let w = null;
+  for (const ms of [120, 300, 520, 800, 1100, 1400, 1800, 2400]) {
+    const wait = ms - (Date.now() - t0);
+    if (wait > 0) await sleep(wait);
+    await shot(page, `wave-${String(ms).padStart(4, '0')}ms`);
+    if (!w) w = await S(world, `return A.wave && { ox: A.wave.ox, oy: A.wave.oy, left: A.wave.end - performance.now() };`).catch(() => null);
+  }
+  check('the opening wave starts at the toolbar icon, top right', w && w.ox > 1100 && w.oy < 0, JSON.stringify(w));
+  const after = await S(world, `return { on: !!A.wave && performance.now() < A.wave.end, n: A.cands.length };`);
+  check('the wave finishes and every box stays drawn', !after.on && after.n > 30, JSON.stringify(after));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Crowded spots in change mode: no ring of arrows, just the edge you're on.
+
+async function denseScenario() {
+  const { page, world, logs } = await setup(url + 'dense.html');
+  await clickUI(page, '.btn.change');
+  await sleep(900);
+  const btn = (i) => page.evaluate((i) => {
+    const r = document.querySelectorAll('.bar button')[i].getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }, i);
+  const b = await btn(5);
+  await page.mouse.move(b.x + b.w / 2, b.y + b.h / 2, { steps: 5 });
+  await sleep(250);
+  const st = await S(world, `return { crowded: A.crowded, n: A.arrows.filter((a) => !a.sel).length };`);
+  check('a crowded toolbar shows no ring of arrows', st.crowded && st.n === 0, JSON.stringify(st));
+  await shot(page, 'dense-1-crowded-hover');
+  const ex = b.x + b.w - 1;
+  const ey = b.y + b.h / 2 + 4;
+  await page.mouse.move(ex, ey, { steps: 3 });
+  await sleep(200);
+  const e = await S(world, `const a = A.arrows.filter((a) => !a.sel); return { n: a.length, edge: a[0] && a[0].edge, exact: a[0] && !!a[0].exact, idx: a[0] ? [...document.querySelectorAll('.bar button')].indexOf(a[0].it.el) : -1, hot: A.hot && A.hot.type };`);
+  check('right on an edge: just that one handle', e.n === 1 && e.edge === 'r' && e.exact && e.idx === 5 && e.hot === 'edge', JSON.stringify(e));
+  await shot(page, 'dense-2-on-edge');
+  const before = [await btn(4), await btn(5), await btn(6)];
+  await drag(page, ex, ey, b.x + b.w + 20, ey, { meta: true });
+  await sleep(200);
+  const after = [await btn(4), await btn(5), await btn(6)];
+  check('dragging it widens only that button', near(after[1].w, before[1].w + 20, 1.5) && same(after[0], before[0]) && same(after[2], before[2]), `${before[1].w} → ${after[1].w}`);
+  await key(page, 'z', ['Meta']);
+  await key(page, 'Escape');
+  const tag = await page.evaluate(() => {
+    const r = document.querySelectorAll('.tag')[7].getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  });
+  await page.mouse.move(tag.x + tag.w / 2, tag.y + tag.h / 2, { steps: 4 });
+  await sleep(200);
+  const t = await S(world, `return { crowded: A.crowded, n: A.arrows.filter((a) => !a.sel).length };`);
+  check('tightly packed tags count as crowded too', t.crowded && t.n <= 1, JSON.stringify(t));
+  await shot(page, 'dense-3-tags');
+  // with the whole tag list picked, a drag from inside it moves the list, even when it starts
+  // right on one tag's edge (that tag's edge isn't offered as a handle there)
+  const tagR = (i) => page.evaluate((i) => {
+    const r = document.querySelectorAll('.tag')[i].getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }, i);
+  for (let i = 0; i < 2; i++) {
+    await page.keyboard.down('Control');
+    await page.mouse.click(tag.x + tag.w / 2, tag.y + tag.h / 2);
+    await page.keyboard.up('Control');
+    await sleep(180);
+  }
+  const picked = await S(world, `return A.sel.map((s) => s.el.className).join(',');`);
+  const list0 = await rectOfPage(page, '.tags');
+  const t7 = await tagR(7);
+  await page.mouse.move(t7.x + t7.w - 1, t7.y + t7.h / 2, { steps: 3 });
+  await sleep(200);
+  const hotThere = await S(world, `return A.hot ? A.hot.type : null;`);
+  await drag(page, t7.x + t7.w - 1, t7.y + t7.h / 2, t7.x + t7.w + 29, t7.y + t7.h / 2 + 20, { meta: true });
+  await sleep(200);
+  const list1 = await rectOfPage(page, '.tags');
+  const t7b = await tagR(7);
+  check('inside a picked box, a drag moves the box (not an inner edge)', picked === 'tags' && !hotThere && near(list1.x - list0.x, 30, 1) && near(list1.y - list0.y, 20, 1) && near(t7b.w, t7.w, 0.5), JSON.stringify({ picked, hotThere, dx: list1.x - list0.x, dy: list1.y - list0.y, w: [t7.w, t7b.w] }));
+  await key(page, 'z', ['Meta']);
+  await key(page, 'Escape');
+  const pic = await rectOfPage(page, '.pic');
+  await page.mouse.move(pic.x + pic.w / 2, pic.y + pic.h / 2, { steps: 6 });
+  await sleep(250);
+  const sp = await S(world, `return { crowded: A.crowded, n: A.arrows.filter((a) => !a.sel).length };`);
+  check('an open area still shows the arrows within reach', !sp.crowded && sp.n >= 2, JSON.stringify(sp));
+  await shot(page, 'dense-4-open-area');
+  const errs = ourErrors(world, logs);
+  check('no errors (dense)', !errs.length, errs.join(' | '));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ctrl-click climbs one level at a time; Ctrl+Shift-click picks everything like it.
+
+async function climbScenario() {
+  const { page, world, logs } = await setup();
+  await clickUI(page, '.btn.change');
+  await sleep(900);
+  const ic = await rectOfPage(page, '.feature .icon');
+  const cx = ic.x + ic.w / 2;
+  const cy = ic.y + ic.h / 2;
+  const sel = () => S(world, `return A.sel.map((s) => s.kind === 'el' ? (s.el.className || s.el.tagName.toLowerCase()) : 'box').join(',');`);
+  const modClick = async (x, y, mods) => {
+    for (const m of mods) await page.keyboard.down(m);
+    await page.mouse.click(x, y);
+    for (const m of mods.slice().reverse()) await page.keyboard.up(m);
+    await sleep(180);
+  };
+  await modClick(cx, cy, ['Control']);
+  const s1 = await sel();
+  await modClick(cx, cy, ['Control']);
+  const s2 = await sel();
+  await shot(page, 'climb-1-card');
+  await modClick(cx, cy, ['Control']);
+  const s3 = await sel();
+  check('Ctrl-click picks the icon, then its card, then the row of cards', s1 === 'icon' && s2 === 'feature' && s3 === 'features', `${s1} → ${s2} → ${s3}`);
+  await page.mouse.click(cx, cy);
+  await sleep(150);
+  const p1 = await sel();
+  await page.mouse.click(cx, cy);
+  await sleep(150);
+  const p2 = await sel();
+  check('a plain click picks the thing under the mouse and stays on it', p1 === 'icon' && p2 === 'icon', `${p1}, ${p2}`);
+  await page.keyboard.down('Control');
+  await page.mouse.move(cx + 1, cy + 1);
+  await sleep(250);
+  const mods = await S(world, `return A.mods;`);
+  await shot(page, 'climb-2-ctrl-preview');
+  await page.keyboard.down('Shift');
+  await page.mouse.move(cx + 2, cy + 2);
+  await sleep(250);
+  await shot(page, 'climb-3-ctrl-shift-preview');
+  await page.keyboard.up('Shift');
+  await page.keyboard.up('Control');
+  check('holding Ctrl previews what a click would pick', mods && mods.mod === true, JSON.stringify(mods));
+  await modClick(cx, cy, ['Control', 'Shift']);
+  const s4 = await sel();
+  check('Ctrl+Shift-click picks every icon like it', s4 === 'icon,icon,icon', s4);
+  await shot(page, 'climb-4-alike');
+  const widths = () => page.evaluate(() => [...document.querySelectorAll('.feature .icon')].map((e) => e.getBoundingClientRect().width));
+  const w0 = await widths();
+  await key(page, 'd');
+  await key(page, 'd');
+  const w1 = await widths();
+  check('W A S D change all of them together', w1.every((w, i) => near(w, w0[i] * 1.1025, 1.5)), `${w0.join('/')} → ${w1.join('/')}`);
+  await key(page, 'z', ['Meta']);
+  await key(page, 'z', ['Meta']);
+  await modClick(cx, cy, ['Control']);
+  const s5 = await sel();
+  check('Ctrl-click with several picked climbs all of them', s5 === 'feature,feature,feature', s5);
+  await key(page, 'Escape');
+  const sf = await rectOfPage(page, '.cta .btn');
+  await modClick(sf.x + sf.w / 2, sf.y + sf.h / 2, ['Control', 'Shift']);
+  const s6 = await S(world, `return A.sel.map((s) => s.el.textContent.trim()).join('|');`);
+  check('Ctrl+Shift-click on a button picks every .btn', s6 === 'Get started|Start free|Book a demo', s6);
+  await key(page, 'Escape');
+  await modClick(cx, cy, ['Meta']);
+  const m1 = await sel();
+  await modClick(cx, cy, ['Meta']);
+  const m2 = await sel();
+  check('⌘-click works the same way', m1 === 'icon' && m2 === 'feature', `${m1} → ${m2}`);
+  check('still in change mode after Control-clicks (no menu got in the way)', (await S(world, `return A.state.mode;`)) === 'change');
+  const errs = ourErrors(world, logs);
+  check('no errors (climb)', !errs.length, errs.join(' | '));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Full-page screenshots, checked pixel by pixel on pages of coloured stripes.
+
+const stripeColor = (i) => [(i * 37 + 60) % 256, (i * 91 + 30) % 256, (i * 53 + 90) % 256];
+const sameColor = (a, b, tol = 3) => a.every((v, k) => Math.abs(v - b[k]) <= tol);
+
+async function takeFull(page, world, how = 'download') {
+  const before = await fs.readdir(DL);
+  const t0 = Date.now();
+  await clickUI(page, `.split.full .half.${how === 'copy' ? 'l' : 'r'}`, { hoverFirst: '.split.full' });
+  let hud = false;
+  let snapHidden = false;
+  let done = false;
+  let file = null;
+  for (let i = 0; i < 400 && !done; i++) {
+    const s2 = await page.evaluate(() => {
+      const r = document.querySelector('precise-dimension').shadowRoot;
+      const h = r.querySelector('.hud');
+      return { on: h.classList.contains('on'), snap: h.classList.contains('snap'), ok: r.querySelector('.split.full').classList.contains('ok'), bad: r.querySelector('.split.full').classList.contains('bad') };
+    });
+    if (s2.on) hud = true;
+    if (s2.snap) snapHidden = true;
+    if (s2.ok || s2.bad) done = true;
+    else await sleep(60);
+  }
+  if (how !== 'copy') file = await waitForFile(DL, before, 20000);
+  const ms = Date.now() - t0;
+  const flashAt = await S(world, `return A.lastFlash || 0;`);
+  return { file, hud, snapHidden, ms, ok: done, flashAt };
+}
+
+function checkDocStripes(img, { d, vw, vh, n, lazy = false }) {
+  const bad = [];
+  const H = 60 + n * 100;
+  if (img.w !== Math.round(vw * d) || img.h !== Math.round(H * d)) bad.push(`size ${img.w}×${img.h}, wanted ${Math.round(vw * d)}×${Math.round(H * d)}`);
+  const at = (x, y) => img.at(Math.floor(x * d), Math.floor(y * d));
+  const expectAt = (y) => {
+    if (y < 60) return [250, 20, 120];
+    const i = Math.floor((y - 60) / 100);
+    return stripeColor(i);
+  };
+  for (let i = 0; i < n; i++) {
+    const y = 60 + i * 100 + 50;
+    if (!sameColor(at(100, y), stripeColor(i))) bad.push(`stripe ${i} centre ${at(100, y)} ≠ ${stripeColor(i)}`);
+    if (Number.isInteger(d)) {
+      const line = img.at(100 * d, (60 + i * 100) * d);
+      const above = img.at(100 * d, (60 + i * 100) * d - 1);
+      if (!sameColor(line, [0, 0, 0])) bad.push(`stripe ${i} top line ${line}`);
+      if (!sameColor(above, i ? stripeColor(i - 1) : [250, 20, 120])) bad.push(`row above stripe ${i}: ${above}`);
+    } else {
+      // at in-between densities lines blend into their neighbours, so look just either side
+      const below = at(100, 60 + i * 100 + 2);
+      const above = at(100, 60 + i * 100 - 1.5);
+      if (!sameColor(below, stripeColor(i))) bad.push(`just below line ${i}: ${below}`);
+      if (!sameColor(above, i ? stripeColor(i - 1) : [250, 20, 120])) bad.push(`just above line ${i}: ${above}`);
+    }
+  }
+  if (!sameColor(at(100, 30), [250, 20, 120])) bad.push(`header missing at the top: ${at(100, 30)}`);
+  for (let k = 1; k * vh < H - 60; k++) {
+    for (const [x, y] of [[100, k * vh + 30], [vw / 2, k * vh + 40], [vw / 2, k * vh + 80]]) {
+      if (y >= H || (y - 60) % 100 < 2) continue;
+      if (!sameColor(at(x, y), expectAt(y))) bad.push(`piece ${k} at (${x},${y}): ${at(x, y)} ≠ ${expectAt(y)} (repeated header or progress card?)`);
+    }
+  }
+  if (!sameColor(at(vw / 2, 40), [250, 20, 120])) bad.push(`progress card in the first piece: ${at(vw / 2, 40)}`);
+  if (H > vh + 100) {
+    if (!sameColor(at(vw - 50, H - 50), [20, 200, 90])) bad.push(`floating button missing at the bottom: ${at(vw - 50, H - 50)}`);
+    if (sameColor(at(vw - 50, vh - 50), [20, 200, 90])) bad.push('floating button repeated in the first piece');
+  }
+  if (lazy) {
+    const li = Math.floor(n * 0.7);
+    const p = at(400, 60 + li * 100 + 50);
+    if (!sameColor(p, [255, 200, 0])) bad.push(`lazy picture not loaded: ${p}`);
+  }
+  return bad;
+}
+
+function checkAppStripes(img, { d, vw, vh, n }) {
+  const bad = [];
+  const extra = n * 100 - (vh - 64 - 40);
+  const H = vh + extra;
+  if (img.w !== Math.round(vw * d) || img.h !== Math.round(H * d)) bad.push(`size ${img.w}×${img.h}, wanted ${Math.round(vw * d)}×${Math.round(H * d)}`);
+  const at = (x, y) => img.at(Math.floor(x * d), Math.floor(y * d));
+  const want = [
+    ['top bar', 640, 30, [250, 20, 120]],
+    ['footer at the very bottom', 640, H - 20, [40, 40, 40]],
+    ['sidebar top item', 100, 64 + 12 + 20, [10, 10, 200]],
+    ['sidebar bottom item at the bottom', 100, H - 40 - 12 - 20, [200, 120, 0]],
+    ['sidebar stretched in the middle', 100, Math.round(H / 2), [230, 230, 240]],
+  ];
+  for (const [name, x, y, c] of want) if (!sameColor(at(x, y), c)) bad.push(`${name}: ${at(x, y)} ≠ ${c}`);
+  for (let i = 0; i < n; i++) {
+    const y = 64 + i * 100 + 50;
+    if (!sameColor(at(420, y), stripeColor(i))) bad.push(`panel stripe ${i}: ${at(420, y)} ≠ ${stripeColor(i)}`);
+    if (Number.isInteger(d) && !sameColor(img.at(420 * d, (64 + i * 100) * d), [0, 0, 0])) bad.push(`panel stripe ${i} top line`);
+  }
+  return bad;
+}
+
+async function fullpageScenario() {
+  const cdp = await browser.target().createCDPSession();
+  await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DL, eventsEnabled: true });
+  const cases = [
+    { name: 'laptop 1x', vw: 1280, vh: 800, d: 1, n: 40, lazy: true },
+    { name: 'retina 2x', vw: 1280, vh: 800, d: 2, n: 40 },
+    { name: 'phone 3x', vw: 390, vh: 844, d: 3, n: 40 },
+    { name: 'odd size 1.5x', vw: 1024, vh: 700, d: 1.5, n: 30 },
+    { name: 'windows 125%', vw: 1280, vh: 657, d: 1.25, n: 40 },
+    { name: 'very long page 2x (written in strips)', vw: 1280, vh: 800, d: 2, n: 90 },
+  ];
+  for (const c of cases) await atDensity(c.d, async () => {
+    const { page, world, logs } = await setup(`${url}stripes.html?n=${c.n}${c.lazy ? '&lazy=1' : ''}`, { width: c.vw, height: c.vh, dpr: c.d });
+    await key(page, 'h'); // guides off, so every pixel is known
+    await sleep(300);
+    const r = await takeFull(page, world);
+    const img = r.file && decodePng(await fs.readFile(path.join(DL, r.file)));
+    const bad = img ? checkDocStripes(img, c) : ['no file'];
+    check(`full page, ${c.name}: every pixel where it belongs`, !bad.length, bad.slice(0, 6).join(' | ') + (img ? `  [${img.w}×${img.h}, ${(r.ms / 1000).toFixed(1)}s]` : ''));
+    if (c.d === 1) {
+      check(`full page, ${c.name}: progress card shown (and hidden for each piece)`, r.hud && r.snapHidden);
+      const sy = await page.evaluate(() => scrollY);
+      check(`full page, ${c.name}: scroll position put back`, sy === 0, String(sy));
+    }
+    if (r.file) await fs.copyFile(path.join(DL, r.file), path.join(OUT, `fullpage-${c.name.replace(/[^a-z0-9]+/gi, '-')}.png`));
+    const errs = ourErrors(world, logs);
+    check(`no errors (full page, ${c.name})`, !errs.length, errs.join(' | '));
+    await page.close();
+  });
+
+  // a web app: the page stays put and the middle panel scrolls
+  await atDensity(2, async () => {
+    const c = { vw: 1280, vh: 800, d: 2, n: 40 };
+    const { page, world, logs } = await setup(`${url}stripes.html?app=1&n=${c.n}`, { width: c.vw, height: c.vh, dpr: c.d });
+    await key(page, 'h');
+    await sleep(300);
+    const r = await takeFull(page, world);
+    const img = r.file && decodePng(await fs.readFile(path.join(DL, r.file)));
+    const bad = img ? checkAppStripes(img, c) : ['no file'];
+    check('full page of a web app: the scrolling panel is stretched out, header and footer once', !bad.length, bad.slice(0, 6).join(' | ') + (img ? `  [${img.w}×${img.h}]` : ''));
+    if (r.file) await fs.copyFile(path.join(DL, r.file), path.join(OUT, 'fullpage-web-app.png'));
+    const st = await page.evaluate(() => document.querySelector('main').scrollTop);
+    check('full page of a web app: panel scroll put back', st === 0, String(st));
+    const errs = ourErrors(world, logs);
+    check('no errors (full page, web app)', !errs.length, errs.join(' | '));
+    await page.close();
+  });
+
+  // copy (with guides on), the flash, and stopping half way with Esc
+  {
+    const { page, world, logs } = await setup(`${url}stripes.html?n=60`);
+    await browser.defaultBrowserContext().overridePermissions(new URL(url).origin, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write']);
+    const t0 = await S(world, `return performance.now();`);
+    const r = await takeFull(page, world, 'copy');
+    const clip = await readClipboardImage(page);
+    check('full-page copy lands on the clipboard at full size', clip.w === 1280 && clip.h === 60 + 6000, JSON.stringify({ w: clip.w, h: clip.h }));
+    check('the screen flashes white when the picture is taken', r.flashAt > t0, `${r.flashAt} > ${t0}`);
+    await sleep(120);
+    const flashNow = await page.evaluate(() => !!document.querySelector('precise-dimension').shadowRoot.querySelector('.flash'));
+    await sleep(1200);
+    const flashGone = await page.evaluate(() => !document.querySelector('precise-dimension').shadowRoot.querySelector('.flash'));
+    check('the flash fades away again', flashGone, `still there right after: ${flashNow}`);
+    if (clip.b64) await fs.writeFile(path.join(OUT, 'fullpage-copied-with-guides.png'), Buffer.from(clip.b64, 'base64'));
+    // Esc half way
+    const before = await fs.readdir(DL);
+    await page.evaluate(() => window.scrollTo(0, 900));
+    await sleep(300);
+    await clickUI(page, '.split.full .half.r', { hoverFirst: '.split.full' });
+    await sleep(1600);
+    await key(page, 'Escape');
+    await sleep(1500);
+    const st = await S(world, `return { capturing: A.state.capturing, sy: scrollY, open: A.state.open };`);
+    const files = (await fs.readdir(DL)).filter((f) => !before.includes(f));
+    check('Esc stops a full-page screenshot and puts the page back', !st.capturing && st.open && st.sy === 900 && !files.length, JSON.stringify({ ...st, files }));
+    const errs = ourErrors(world, logs);
+    check('no errors (full page copy)', !errs.length, errs.join(' | '));
+    await page.close();
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 
 async function lifecycleScenario() {
@@ -738,6 +1111,9 @@ async function sitesScenario() {
           const py = vis.y + vis.h * fy;
           await page.mouse.move(px, py, { steps: 2 });
           await sleep(90);
+          // live pages still shift while they load, so the spot has to stay clear for a moment
+          if (await S(world, `return A.hot ? A.hot.type : null;`)) continue;
+          await sleep(160);
           if (!(await S(world, `return A.hot ? A.hot.type : null;`))) {
             gx = px;
             gy = py;
@@ -836,7 +1212,7 @@ async function insecureScenario() {
   await page.close();
 }
 
-const scenarios = { measure: measureScenario, draw: drawScenario, change: changeScenario, canvas: canvasScenario, capture: captureScenario, lifecycle: lifecycleScenario, insecure: insecureScenario, sites: sitesScenario };
+const scenarios = { measure: measureScenario, wave: waveScenario, draw: drawScenario, change: changeScenario, dense: denseScenario, climb: climbScenario, canvas: canvasScenario, capture: captureScenario, fullpage: fullpageScenario, lifecycle: lifecycleScenario, insecure: insecureScenario, sites: sitesScenario };
 export { scenarios, setup, S, shot, check, near, ourErrors, browser, url, OUT, DL };
 
 for (const [name, fn] of Object.entries(scenarios)) {

@@ -1,10 +1,12 @@
 // Draws every guide, label, box, handle and animation onto one full-screen canvas.
-import { app } from './app.js';
+import { app, WAVE, keepAnimating } from './app.js';
+import { hub } from './hub.js';
 import { clipRect } from './collect.js';
 import { fmt, fmtGap } from './units.js';
-import { clamp, easeOutCubic, easeOutBack, rectOf, isRootish, union, intersect, deepContains } from './util.js';
+import { clamp, easeOutCubic, easeOutBack, rectOf, isRootish, union, intersect, deepContains, containsPt, describe, parentPick } from './util.js';
 import { activeShapes, shapeRect } from './shapes.js';
-import { itemRect, itemCtx, elItem, shapeItem } from './items.js';
+import { itemRect, itemCtx, elItem, shapeItem, same } from './items.js';
+import { alikeCached, alikeLabel } from './alike.js';
 
 const FONT = '600 10px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 const FONT_INFO = '600 10.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
@@ -87,11 +89,19 @@ function boxPath(ctx, r, rad = 0, circle = false) {
   }
 }
 
-function chip(ctx, r, s, bg, fg, lp = 1, border = null) {
-  const sc = lp >= 1 ? 1 : 0.65 + 0.35 * easeOutBack(lp);
+// A label tag. bp = how far its box has grown in, tp = how far its text has faded in: the box
+// stretches out to its size first, then the number appears on top.
+function grow(ctx, bp) {
+  if (bp >= 1) return;
+  const k = easeOutBack(bp);
+  ctx.scale(Math.max(0.01, k), Math.max(0.01, 0.45 + 0.55 * Math.min(1, easeOutCubic(bp))));
+}
+
+function chip(ctx, r, s, bg, fg, bp = 1, border = null, tp = 1) {
+  if (bp <= 0) return;
   ctx.save();
   ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
-  if (sc !== 1) ctx.scale(sc, sc);
+  grow(ctx, bp);
   ctx.beginPath();
   ctx.roundRect(-r.w / 2, -r.h / 2, r.w, r.h, 3.5);
   ctx.fillStyle = bg;
@@ -101,18 +111,21 @@ function chip(ctx, r, s, bg, fg, lp = 1, border = null) {
     ctx.strokeStyle = border;
     ctx.stroke();
   }
-  ctx.fillStyle = fg;
-  ctx.fillText(s, 0, 0.5);
+  if (tp > 0) {
+    if (tp < 1) ctx.globalAlpha *= tp;
+    ctx.fillStyle = fg;
+    ctx.fillText(s, 0, 0.5);
+  }
   ctx.restore();
 }
 
 // Vertical chip (reads top to bottom like the original's height label).
-function chipV(ctx, r, s, bg, fg, lp = 1, border = null) {
-  const sc = lp >= 1 ? 1 : 0.65 + 0.35 * easeOutBack(lp);
+function chipV(ctx, r, s, bg, fg, bp = 1, border = null, tp = 1) {
+  if (bp <= 0) return;
   ctx.save();
   ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
   ctx.rotate(Math.PI / 2);
-  if (sc !== 1) ctx.scale(sc, sc);
+  grow(ctx, bp);
   ctx.beginPath();
   ctx.roundRect(-r.h / 2, -r.w / 2, r.h, r.w, 3.5);
   ctx.fillStyle = bg;
@@ -122,13 +135,70 @@ function chipV(ctx, r, s, bg, fg, lp = 1, border = null) {
     ctx.strokeStyle = border;
     ctx.stroke();
   }
-  ctx.fillStyle = fg;
-  ctx.fillText(s, 0, 0.5);
+  if (tp > 0) {
+    if (tp < 1) ctx.globalAlpha *= tp;
+    ctx.fillStyle = fg;
+    ctx.fillText(s, 0, 0.5);
+  }
   ctx.restore();
 }
 
 function revealP(c, now) {
   return clamp((now - c.at) / REVEAL_MS, 0, 1);
+}
+
+// ---- the opening wave ----------------------------------------------------------------------
+// An invisible circle bursts out of the toolbar icon (top right). Outlines are only drawn inside
+// it, so the circle itself never shows: you see it only through the lines being traced, with a
+// bright tip where they're being drawn. The label boxes grow in behind it, in the same order,
+// and once they're all in, the numbers fade in on top.
+
+const WAVE_MS = 760;
+const CHIP_MS = 220;
+const TEXT_MS = 240;
+const CHIP_LAG = 90;
+const TEXT_SPREAD = 200;
+const GLOW = 120;
+const waveEase = (t) => 1 - Math.pow(1 - t, 2.4);
+const waveInv = (p) => 1 - Math.pow(1 - clamp(p, 0, 1), 1 / 2.4);
+
+export function startWave() {
+  app.wave = null;
+  if (app.reduceMotion) return;
+  const ox = Math.max(0, app.vw - 92); // where the extension icon sits, just above the page
+  const oy = -40;
+  const maxR = Math.max(Math.hypot(ox, app.vh - oy), Math.hypot(app.vw - ox, app.vh - oy)) + GLOW;
+  const t0 = performance.now();
+  app.wave = { t0, ox, oy, maxR, grow: t0 + WAVE_MS, end: t0 + WAVE_MS + CHIP_LAG + CHIP_MS + TEXT_SPREAD + TEXT_MS };
+  keepAnimating(app.wave.end - t0 + 120);
+}
+
+export function waveOn(now) {
+  const w = app.wave;
+  return !!w && !app.state.capturing && now < w.end;
+}
+
+function waveR(w, now) {
+  return w.maxR * waveEase(clamp((now - w.t0) / WAVE_MS, 0, 1));
+}
+
+function distNear(r, w) {
+  const dx = Math.max(r.x - w.ox, 0, w.ox - (r.x + r.w));
+  const dy = Math.max(r.y - w.oy, 0, w.oy - (r.y + r.h));
+  return Math.hypot(dx, dy);
+}
+
+function distFar(r, w) {
+  const dx = Math.max(Math.abs(r.x - w.ox), Math.abs(r.x + r.w - w.ox));
+  const dy = Math.max(Math.abs(r.y - w.oy), Math.abs(r.y + r.h - w.oy));
+  return Math.hypot(dx, dy);
+}
+
+// When a label at distance d grows in, and when its number fades in.
+function labelTimes(w, d) {
+  const box = w.t0 + CHIP_LAG + waveInv(d / w.maxR) * WAVE_MS;
+  const text = w.t0 + WAVE_MS + CHIP_LAG + CHIP_MS + (d / w.maxR) * TEXT_SPREAD;
+  return [box, text];
 }
 
 // ---- main ---------------------------------------------------------------------
@@ -156,8 +226,8 @@ export function draw(now) {
 
   if (guides) drawGuides(ctx, now);
   if (guides && ui && !app.drag) {
-    if (st.mode === 'change') drawChangeHover(ctx);
-    else drawMeasureHover(ctx);
+    if (st.mode === 'change') drawChangeHover(ctx, now);
+    else drawMeasureHover(ctx, now);
   }
   if (st.mode === 'change' && guides && ui) drawFlexForSelection(ctx);
   drawShapes(ctx, now, ui);
@@ -165,6 +235,7 @@ export function draw(now) {
     drawSelection(ctx);
     if (editing) {
       app.arrows = computeArrows();
+      hub.refreshHot();
       drawArrows(ctx);
     } else app.arrows = [];
     drawSpacing(ctx);
@@ -197,6 +268,16 @@ function drawGuides(ctx, now) {
   }
   app.occRects = occ;
   let occPath = null;
+  const w = waveOn(now) ? app.wave : null;
+  const wr = w ? waveR(w, now) : 0;
+  let glow = null;
+  if (w && wr < w.maxR - 1) {
+    glow = ctx.createRadialGradient(w.ox, w.oy, Math.max(0, wr - GLOW), w.ox, w.oy, Math.max(1, wr));
+    glow.addColorStop(0, 'rgba(110,215,255,0)');
+    glow.addColorStop(0.62, 'rgba(120,220,255,0.28)');
+    glow.addColorStop(0.93, 'rgba(225,248,255,0.9)');
+    glow.addColorStop(1, 'rgba(255,255,255,1)');
+  }
   for (const c of app.cands) {
     if (c.dup || c.w < 1 || c.h < 1) continue;
     if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
@@ -206,13 +287,36 @@ function drawGuides(ctx, now) {
     if (clip && (c.x >= clip.x + clip.w || c.y >= clip.y + clip.h || c.x + c.w <= clip.x || c.y + c.h <= clip.y)) continue;
     const under = occ.length && !c.isOcc && !c.occ ? occ.filter((o) => overlapsR(o, c)) : null;
     if (under && under.some((o) => o.x <= c.x && o.y <= c.y && o.x + o.w >= c.x + c.w && o.y + o.h >= c.y + c.h)) continue;
-    const p = revealP(c, now);
-    if (p <= 0) continue;
-    const e = easeOutCubic(p);
+    const hidden = under && under.length ? under : null;
+    // how far this box is drawn in
+    let e = 1;
+    let fp = 1;
+    let cut = false; // only partly inside the wave
+    let lit = false; // the wave's bright tip is passing over it
+    const byWave = c.at === WAVE && !!w;
+    if (byWave) {
+      const dn = distNear(c, w);
+      if (dn > wr) {
+        vis.push({ c, e: 0, clip, under: hidden, show: false, wave: true });
+        continue;
+      }
+      const df = distFar(c, w);
+      cut = df > wr;
+      lit = !!glow && df > wr - GLOW;
+      fp = clamp((wr - dn) / (df - dn + 220), 0, 1);
+    } else if (c.at !== WAVE) {
+      const p = revealP(c, now);
+      if (p <= 0) {
+        vis.push({ c, e: 0, clip, under: hidden, show: false });
+        continue;
+      }
+      e = easeOutCubic(p);
+      fp = clamp((e - 0.2) / 0.8, 0, 1);
+    }
     const col = hueFor(c.depth, mode);
     const clipped = clip && !(c.x >= clip.x && c.y >= clip.y && c.x + c.w <= clip.x + clip.w && c.y + c.h <= clip.y + clip.h);
-    const hidden = under && under.length;
-    if (clipped || hidden) {
+    const saved = clipped || hidden || cut;
+    if (saved) {
       ctx.save();
       if (clipped) {
         ctx.beginPath();
@@ -230,12 +334,20 @@ function drawGuides(ctx, now) {
     }
     ctx.beginPath();
     boxPath(ctx, c, c.rad, c.circle);
-    const fp = clamp((e - 0.2) / 0.8, 0, 1);
+    // the fill just fades in as the wave crosses the box; only the lines are traced by it
     if (fill > 0.001 && fp > 0) {
       ctx.fillStyle = hsla(col, fill * fp);
       ctx.fill();
     }
-    const op = clamp(e / 0.72, 0, 1);
+    if (cut) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(w.ox, w.oy, wr, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.beginPath();
+      boxPath(ctx, c, c.rad, c.circle);
+    }
+    const op = byWave ? 1 : clamp(e / 0.72, 0, 1);
     if (op < 1) {
       const per = 2 * (c.w + c.h);
       ctx.setLineDash([per * op, per + 20]);
@@ -244,17 +356,23 @@ function drawGuides(ctx, now) {
     ctx.strokeStyle = hsla(col, change ? 0.5 : 0.85);
     ctx.stroke();
     ctx.setLineDash([]);
-    if (clipped || hidden) ctx.restore();
-    vis.push({ c, e, clip, under: hidden ? under : null });
+    if (lit) {
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = glow;
+      ctx.stroke();
+    }
+    if (cut) ctx.restore();
+    if (saved) ctx.restore();
+    vis.push({ c, e, clip, under: hidden, show: true, wave: byWave });
   }
-  drawLabels(ctx, vis, mode);
+  drawLabels(ctx, vis, mode, now, w);
 }
 
 function overlapsR(a, b) {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-function drawLabels(ctx, vis, mode) {
+function drawLabels(ctx, vis, mode, now, w) {
   const grid = new Grid(48);
   if (app.uiRect) grid.tryAdd(app.uiRect, 0);
   const view = { x: 0, y: 0, w: app.vw, h: app.vh };
@@ -267,22 +385,36 @@ function drawLabels(ctx, vis, mode) {
     if (t) words.add(t);
   }
   ctx.font = FONT;
+  // how far a label at rect r has come in: [box, text]
+  const prog = (v, r) => {
+    if (v.wave && w) {
+      const [tb, tt] = labelTimes(w, Math.hypot(r.x + r.w / 2 - w.ox, r.y + r.h / 2 - w.oy));
+      return [clamp((now - tb) / CHIP_MS, 0, 1), clamp((now - tt) / TEXT_MS, 0, 1)];
+    }
+    if (!v.show) return [0, 0];
+    return [clamp((v.e - 0.42) / 0.34, 0, 1), clamp((v.e - 0.7) / 0.3, 0, 1)];
+  };
   for (const v of vis) {
     const c = v.c;
-    const lp = clamp((v.e - 0.45) / 0.55, 0, 1);
-    if (lp <= 0) continue;
     let bound = intersect(c, view);
     if (bound && v.clip) bound = intersect(bound, v.clip);
     if (!bound) continue;
     const col = hueFor(c.depth, mode);
-    const a = (mode === 'change' ? 0.8 : 0.95) * lp;
+    const a = mode === 'change' ? 0.8 : 0.95;
     const bg = hsla(col, a, -8);
-    const fg = `rgba(255,255,255,${Math.min(1, a + 0.05)})`;
+    const fg = 'rgba(255,255,255,1)';
+    const put = (vertical, r, s) => {
+      const [bp, tp] = prog(v, r);
+      if (bp <= 0) return;
+      const b = tp >= 1 ? bg : hsla(col, a * (0.5 + 0.5 * tp), -8 + 14 * (1 - tp));
+      if (vertical) chipV(ctx, r, s, b, fg, bp, null, tp);
+      else chip(ctx, r, s, b, fg, bp, null, tp);
+    };
     if (c.circle) {
       const s = '⌀ ' + fmt(c.w, 'w', c);
-      const w = tw(ctx, s) + 8;
-      const r = { x: bound.x + bound.w / 2 - w / 2, y: bound.y + bound.h / 2 - CHIP_H / 2, w, h: CHIP_H };
-      if (bound.w >= w + 2 && bound.h >= CHIP_H && !words.hits(r, 0.5) && grid.tryAdd(r)) chip(ctx, r, s, bg, fg, lp);
+      const cw = tw(ctx, s) + 8;
+      const r = { x: bound.x + bound.w / 2 - cw / 2, y: bound.y + bound.h / 2 - CHIP_H / 2, w: cw, h: CHIP_H };
+      if (bound.w >= cw + 2 && bound.h >= CHIP_H && !words.hits(r, 0.5) && grid.tryAdd(r)) put(false, r, s);
       continue;
     }
     // Labels sit inside the box, like the original app: width at the bottom, height on the
@@ -321,7 +453,7 @@ function drawLabels(ctx, vis, mode) {
       for (const sp of spots) {
         const r = { x: sp.x, y: sp.y, w: wW, h: CHIP_H };
         if (ok(r)) {
-          chip(ctx, r, ws, bg, fg, lp);
+          put(false, r, ws);
           wAtRight = !!sp.right;
           break;
         }
@@ -343,7 +475,7 @@ function drawLabels(ctx, vis, mode) {
       for (const x of spots) {
         const r = { x, y, w: CHIP_H, h: hW };
         if (ok(r)) {
-          chipV(ctx, r, hs, bg, fg, lp);
+          put(true, r, hs);
           break;
         }
       }
@@ -383,14 +515,44 @@ function infoChip(ctx, r, s, bg) {
 }
 
 function elInfo(el, r, c) {
-  const tag = el.tagName.toLowerCase();
-  let s = `${tag}   ${fmt(r.w, 'w', c)} × ${fmt(r.h, 'h', c)}`;
+  let s = `${describe(el)}   ${fmt(r.w, 'w', c)} × ${fmt(r.h, 'h', c)}`;
   if (c && c.text && c.fs) s += `   ·   ${Math.round(c.fs)}px text`;
-  if (c && c.circle) s = `${tag}   ⌀ ${fmt(r.w, 'w', c)}`;
+  if (c && c.circle) s = `${describe(el)}   ⌀ ${fmt(r.w, 'w', c)}`;
   return s;
 }
 
-function drawMeasureHover(ctx) {
+// The hover box pops: it starts a little bigger and snaps onto the element, so you can see
+// the moment the pick changes to something else.
+const pop = { el: null, t0: 0 };
+function popped(el, r, now) {
+  if (pop.el !== el) {
+    pop.el = el;
+    pop.t0 = now;
+    keepAnimating(220);
+  }
+  const e = easeOutCubic(clamp((now - pop.t0) / 170, 0, 1));
+  const k = (1 - e) * 6;
+  return { r: { x: r.x - k, y: r.y - k, w: r.w + 2 * k, h: r.h + 2 * k }, e, k };
+}
+
+function hoverBox(ctx, el, r, c, col, now, strong) {
+  const P = popped(el, r, now);
+  ctx.save();
+  ctx.beginPath();
+  boxPath(ctx, P.r, (c.rad || 0) + P.k, c.circle);
+  ctx.fillStyle = hsla(col, (strong ? 0.16 : 0.1) + app.state.fill * 0.3);
+  ctx.fill();
+  // a white halo under the outline so it shows up on any page, light or dark
+  ctx.lineWidth = strong ? 5.5 : 4;
+  ctx.strokeStyle = `rgba(255,255,255,${(strong ? 0.85 : 0.6) * P.e})`;
+  ctx.stroke();
+  ctx.lineWidth = strong ? 2.5 : 2;
+  ctx.strokeStyle = hsla(col, 1);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMeasureHover(ctx, now) {
   const h = app.hover;
   if (!h || h.kind !== 'el' || !h.el.isConnected) return;
   const el = h.el;
@@ -398,36 +560,75 @@ function drawMeasureHover(ctx) {
   if (r.w < 1 || r.h < 1) return;
   const c = app.candByEl.get(el) || itemCtx(h);
   const col = [217, 96, 54];
-  ctx.beginPath();
-  boxPath(ctx, r, c.rad || 0, c.circle);
-  ctx.fillStyle = hsla(col, 0.1 + app.state.fill * 0.3);
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = hsla(col, 1);
-  ctx.stroke();
+  hoverBox(ctx, el, r, c, col, now, false);
   const p = parentBox(el);
   if (p) drawInnerDistances(ctx, r, p.r, c, el);
   infoChip(ctx, r, elInfo(el, r, c), hsla(col, 0.97, -10));
 }
 
-function drawChangeHover(ctx) {
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+export const MOD_NAME = MAC ? 'Ctrl/⌘' : 'Ctrl';
+
+// What a Ctrl-click would pick: the thing under the mouse, or, when that's inside what's
+// already picked, the box around the current pick (one level up each click).
+export function climbTarget(el) {
+  const cur = app.sel.length === 1 && app.sel[0].kind === 'el' ? app.sel[0].el : null;
+  if (cur && cur.isConnected && deepContains(cur, el)) return parentPick(cur) || cur;
+  return el;
+}
+
+// The thing whose look-alikes a Ctrl+Shift-click would pick.
+export function alikeBase(el) {
+  const cur = app.sel.length === 1 && app.sel[0].kind === 'el' ? app.sel[0].el : null;
+  return cur && cur.isConnected && deepContains(cur, el) ? cur : el;
+}
+
+function drawChangeHover(ctx, now) {
   const h = app.hover;
-  if (!h) return;
-  if (h.kind === 'el') {
-    if (!h.el.isConnected) return;
-    const r = rectOf(h.el);
-    const c = app.candByEl.get(h.el) || itemCtx(h);
-    const col = [270, 88, 58];
+  if (!h || h.kind !== 'el' || !h.el.isConnected) return;
+  const el = h.el;
+  const mods = app.mods;
+  const col = [270, 88, 58];
+  if (mods.mod && mods.shift) return drawAlikePreview(ctx, el, now);
+  let target = el;
+  if (mods.mod) target = climbTarget(el);
+  const r = rectOf(target);
+  if (r.w < 1 || r.h < 1) return;
+  const c = app.candByEl.get(target) || itemCtx(elItem(target));
+  hoverBox(ctx, target, r, c, col, now, true);
+  if (c.flex || c.grid) drawFlexGaps(ctx, target, r, c);
+  const picked = app.sel.some((s) => s.kind === 'el' && s.el === target);
+  if (mods.mod && target !== el) infoChip(ctx, r, `${MOD_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
+  else if (!picked) infoChip(ctx, r, elInfo(target, r, c), hsla(col, 0.97, -12));
+}
+
+function drawAlikePreview(ctx, el, now) {
+  const base = alikeBase(el);
+  const list = alikeCached(base);
+  const col = [292, 84, 60];
+  ctx.save();
+  for (const o of list) {
+    if (!o.isConnected) continue;
+    const r = rectOf(o);
+    if (r.x > app.vw || r.y > app.vh || r.x + r.w < 0 || r.y + r.h < 0) continue;
+    const c = app.candByEl.get(o) || { rad: 0 };
     ctx.beginPath();
     boxPath(ctx, r, c.rad || 0, c.circle);
-    ctx.fillStyle = hsla(col, 0.12 + app.state.fill * 0.3);
+    ctx.fillStyle = hsla(col, 0.14);
     ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.stroke();
     ctx.lineWidth = 2;
     ctx.strokeStyle = hsla(col, 1);
     ctx.stroke();
-    if (c.flex || c.grid) drawFlexGaps(ctx, h.el, r, c);
-    if (!app.sel.some((s) => s.kind === 'el' && s.el === h.el)) infoChip(ctx, r, elInfo(h.el, r, c), hsla(col, 0.97, -12));
   }
+  ctx.restore();
+  const r = rectOf(base);
+  const n = list.length;
+  const s = n > 1 ? `${MOD_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
+  infoChip(ctx, r, s, hsla(col, 0.97, -18));
+  popped(base, r, now);
 }
 
 // Nearest edge in each direction: a neighbour beside it, or else the box it sits in.
@@ -783,61 +984,163 @@ function drawSelection(ctx) {
   }
 }
 
+function edgePoints(r) {
+  return [
+    ['t', r.x + r.w / 2, r.y],
+    ['b', r.x + r.w / 2, r.y + r.h],
+    ['l', r.x, r.y + r.h / 2],
+    ['r', r.x + r.w, r.y + r.h / 2],
+  ];
+}
+
+// The point on an edge that's a fraction f of the way along it.
+function alongEdge(r, edge, f = 0.5) {
+  if (edge === 't' || edge === 'b') return [r.x + r.w * f, edge === 't' ? r.y : r.y + r.h];
+  return [edge === 'l' ? r.x : r.x + r.w, r.y + r.h * f];
+}
+
+function edgeLine(r, edge) {
+  if (edge === 't') return [r.x, r.y, r.x + r.w, r.y];
+  if (edge === 'b') return [r.x, r.y + r.h, r.x + r.w, r.y + r.h];
+  if (edge === 'l') return [r.x, r.y, r.x, r.y + r.h];
+  return [r.x + r.w, r.y, r.x + r.w, r.y + r.h];
+}
+
+// Lots of handles, or handles packed tightly together, means a busy part of the page.
+function isCrowded(list) {
+  const pts = [];
+  for (const a of list) if (!pts.some((p) => Math.abs(p.x - a.x) < 3 && Math.abs(p.y - a.y) < 3)) pts.push(a);
+  if (pts.length > 9) return true;
+  let close = 0;
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < 18) close++;
+  }
+  return close >= 3;
+}
+
+// The edge the cursor is right on top of (anywhere along it), if any. Its handle follows the
+// cursor along the edge so you can grab it where you are.
+// The edge right under the cursor, as a handle that can be dragged. The selection's own edges
+// always count. Other things' edges only count in crowded spots, where the ring of arrows is
+// hidden, and never inside the selection: there a drag moves what's picked (otherwise, on a busy
+// page, nearly every spot is near some inner edge and the selection could hardly be moved).
+function edgeUnderCursor(mx, my, pageEls, crowded) {
+  let best = null;
+  const test = (r, info) => {
+    if (r.w < 4 || r.h < 4) return;
+    const inside = mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
+    const tolX = info.sel ? 6 : clamp(r.w * 0.16, 2, 5);
+    const tolY = info.sel ? 6 : clamp(r.h * 0.16, 2, 5);
+    const inX = mx >= r.x - 1 && mx <= r.x + r.w + 1;
+    const inY = my >= r.y - 1 && my <= r.y + r.h + 1;
+    const opts = [];
+    if (inX) opts.push(['t', Math.abs(my - r.y), tolY], ['b', Math.abs(my - (r.y + r.h)), tolY]);
+    if (inY) opts.push(['l', Math.abs(mx - r.x), tolX], ['r', Math.abs(mx - (r.x + r.w)), tolX]);
+    for (const [edge, dist, tol] of opts) {
+      if (dist > tol) continue;
+      // the picked thing first, then the thing the cursor is inside, then the smaller one
+      const score = dist - (info.sel ? 8 : 0) - (inside ? 1.5 : 0) + Math.sqrt(r.w * r.h) * 0.002;
+      if (!best || score < best.score) best = { score, edge, r, info };
+    }
+  };
+  let inSel = false;
+  for (const it of app.sel) {
+    if (it.kind === 'el' && !it.el.isConnected) continue;
+    const r = itemRect(it);
+    if (containsPt(r, mx, my)) inSel = true;
+    test(r, { sel: true, it });
+  }
+  if (crowded && !inSel) for (const s of activeShapes()) test(shapeRect(s), { it: shapeItem(s) });
+  if (pageEls && crowded && !inSel) {
+    const onBar = app.occRects && app.occRects.some((o) => containsPt(o, mx, my));
+    for (const c of app.cands) {
+      if (c.dup || c.w < 6 || c.h < 6) continue;
+      if (c.x > mx + 8 || c.x + c.w < mx - 8 || c.y > my + 8 || c.y + c.h < my - 8) continue;
+      if (onBar && !c.isOcc && !c.occ) continue; // it's under a sticky header right here
+      if (c.clip) {
+        const k = clipRect(c.clip);
+        if (k === false || (k && !containsPt(k, mx, my, 2))) continue;
+      }
+      test(c, { el: c.el });
+    }
+  }
+  if (!best) return null;
+  const { edge, r, info } = best;
+  const horiz = edge === 't' || edge === 'b';
+  const len = horiz ? r.w : r.h;
+  let f = 0.5;
+  if (len > 16) f = clamp(((horiz ? mx - r.x : my - r.y) / len), 6 / len, 1 - 6 / len);
+  const [x, y] = alongEdge(r, edge, f);
+  const it = info.it || elItem(info.el);
+  return { it, edge, x, y, f, d: 0, exact: true, sel: !!info.sel, line: edgeLine(r, edge) };
+}
+
 function computeArrows() {
   const out = [];
   const m = app.mouse;
+  app.crowded = false;
   if (!m.inside || app.state.capturing) return out;
   const d = app.drag;
   if (d && d.type !== 'pending') {
     if (d.type === 'edge') {
-      const r = itemRect(d.items[0].it);
-      const e = d.edge;
-      const pt = e === 't' ? [r.x + r.w / 2, r.y] : e === 'b' ? [r.x + r.w / 2, r.y + r.h] : e === 'l' ? [r.x, r.y + r.h / 2] : [r.x + r.w, r.y + r.h / 2];
-      out.push({ it: d.items[0].it, edge: e, x: pt[0], y: pt[1], d: 0, hot: true });
+      const it = d.main || d.items[0].it;
+      const r = itemRect(it);
+      const [x, y] = alongEdge(r, d.edge, d.f == null ? 0.5 : d.f);
+      out.push({ it, edge: d.edge, x, y, d: 0, hot: true, line: d.exact ? edgeLine(r, d.edge) : null });
     }
     return out;
   }
   const R = Math.min(app.vw * 0.1, 170);
   const W = app.vw;
   const H = app.vh;
-  const push = (it, r) => {
-    const pts = [
-      ['t', r.x + r.w / 2, r.y],
-      ['b', r.x + r.w / 2, r.y + r.h],
-      ['l', r.x, r.y + r.h / 2],
-      ['r', r.x + r.w, r.y + r.h / 2],
-    ];
-    for (const [edge, x, y] of pts) {
+  const near = [];
+  const push = (it, r, key) => {
+    for (const [edge, x, y] of edgePoints(r)) {
       const dd = Math.hypot(x - m.x, y - m.y);
-      if (dd < R) out.push({ it: typeof it === 'function' ? it() : it, edge, x, y, d: dd });
+      if (dd < R) near.push({ it, key, edge, x, y, d: dd });
     }
   };
-  for (const s of activeShapes()) push(shapeItem(s), shapeRect(s));
-  if (app.state.mode === 'change' && !app.state.canvasMode && app.state.guides) {
+  for (const s of activeShapes()) push(shapeItem(s), shapeRect(s), s);
+  const pageEls = app.state.mode === 'change' && !app.state.canvasMode && app.state.guides;
+  if (pageEls) {
     for (const c of app.cands) {
       if (c.dup || c.w < 10 || c.h < 10) continue;
       if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
       if (c.x > m.x + R || c.x + c.w < m.x - R || c.y > m.y + R || c.y + c.h < m.y - R) continue;
-      const el = c.el;
-      push(() => elItem(el), c);
+      push(null, c, c.el);
     }
   }
   // selected items always show their edges
+  const selA = [];
   for (const it of app.sel) {
     if (it.kind === 'el' && !it.el.isConnected) continue;
-    const r = itemRect(it);
-    const pts = [['t', r.x + r.w / 2, r.y], ['b', r.x + r.w / 2, r.y + r.h], ['l', r.x, r.y + r.h / 2], ['r', r.x + r.w, r.y + r.h / 2]];
-    for (const [edge, x, y] of pts) out.push({ it, edge, x, y, d: Math.min(R * 0.5, Math.hypot(x - m.x, y - m.y)), sel: true });
+    for (const [edge, x, y] of edgePoints(itemRect(it))) selA.push({ it, edge, x, y, d: Math.min(R * 0.5, Math.hypot(x - m.x, y - m.y)), sel: true });
+  }
+  // Busy spot (handles packed tightly): no ring of handles, just the edge you're right on.
+  const crowded = isCrowded(near);
+  app.crowded = crowded;
+  const exact = edgeUnderCursor(m.x, m.y, pageEls, crowded);
+  let list;
+  if (crowded) {
+    list = selA;
+  } else {
+    list = selA.concat(near);
+  }
+  if (exact) {
+    // the handle follows the cursor along that edge instead of sitting in the middle
+    const key = exact.it.kind === 'el' ? exact.it.el : exact.it.shape;
+    list = list.filter((a) => a.edge !== exact.edge || (a.it ? (a.it.kind === 'el' ? a.it.el : a.it.shape) : a.key) !== key);
+    list.push(exact);
   }
   // the selection's own handles win over a neighbour's handle in the same spot
-  out.sort((a, b) => (a.sel ? 0 : 1) - (b.sel ? 0 : 1) || a.d - b.d);
-  const res = [];
-  for (const a of out) {
-    if (res.length >= 30) break;
-    if (res.some((b) => Math.abs(b.x - a.x) < 9 && Math.abs(b.y - a.y) < 9)) continue;
-    res.push(a);
+  list.sort((a, b) => (a.exact ? 0 : 1) - (b.exact ? 0 : 1) || (a.sel ? 0 : 1) - (b.sel ? 0 : 1) || a.d - b.d);
+  for (const a of list) {
+    if (out.length >= 30) break;
+    if (out.some((b) => Math.abs(b.x - a.x) < 9 && Math.abs(b.y - a.y) < 9)) continue;
+    if (!a.it) a.it = a.key && a.key.nodeType === 1 ? elItem(a.key) : shapeItem(a.key);
+    out.push(a);
   }
-  return res;
+  return out;
 }
 
 function tri(ctx, tx, ty, dx, dy, s) {
@@ -858,11 +1161,27 @@ function drawArrows(ctx) {
   const R = Math.min(app.vw * 0.1, 170);
   const hot = app.hot && app.hot.type === 'edge' ? app.hot : null;
   const change = app.state.mode === 'change';
+  const solid = change ? PURPLE_SEL : BLUE_SEL;
   ctx.save();
+  for (const a of app.arrows) {
+    if (!a.line) continue;
+    // light up the whole edge you're on
+    ctx.globalAlpha = 1;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(a.line[0], a.line[1]);
+    ctx.lineTo(a.line[2], a.line[3]);
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.stroke();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = solid;
+    ctx.stroke();
+  }
   ctx.lineWidth = 1;
   ctx.strokeStyle = 'rgba(255,255,255,0.9)';
   for (const a of app.arrows) {
-    const isHot = a.hot || (hot && hot.x === a.x && hot.y === a.y);
+    const isHot = a.hot || a.exact || (hot && hot.edge === a.edge && same(hot.it, a.it));
     const alpha = isHot ? 1 : clamp(1 - a.d / R, 0.18, 0.95);
     const s = isHot ? 5.5 : 4.2;
     const gap = 2.5;

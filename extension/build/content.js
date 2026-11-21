@@ -2,6 +2,7 @@
 (() => {
   // src/content/app.js
   var HOST_TAG = "precise-dimension";
+  var WAVE = -1;
   var app = {
     // DOM
     host: null,
@@ -37,6 +38,9 @@
     openedAt: 0,
     revealed: /* @__PURE__ */ new WeakMap(),
     // el -> time it first appeared (so re-collects don't replay the cascade)
+    wave: null,
+    // the opening animation: { t0, ox, oy, maxR, end }
+    reduceMotion: false,
     // user-drawn boxes
     shapes: { page: [], canvas: [] },
     // interaction
@@ -51,6 +55,9 @@
     preview: null,
     snapLines: [],
     arrows: [],
+    crowded: false,
+    mods: { mod: false, shift: false },
+    // Ctrl/⌘ and Shift, for the click previews
     chips: [],
     spacing: null,
     pulses: [],
@@ -106,7 +113,9 @@
     toggleGuides: noop,
     group: noop,
     ungroup: noop,
-    cancelDrag: noop
+    cancelDrag: noop,
+    cancelCapture: noop,
+    refreshHot: noop
   };
 
   // src/content/util.js
@@ -174,6 +183,21 @@
   }
   function isRootish(el) {
     return el === document.documentElement || el === document.body;
+  }
+  function parentOf(el) {
+    if (el.parentElement) return el.parentElement;
+    const root = el.getRootNode ? el.getRootNode() : null;
+    return root && root.host ? root.host : null;
+  }
+  function parentPick(el) {
+    const r = rectOf(el);
+    let p = parentOf(el);
+    while (p && !isRootish(p)) {
+      const pr = rectOf(p);
+      if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
+      p = parentOf(p);
+    }
+    return null;
   }
   function pageIsTyping() {
     let a = document.activeElement;
@@ -546,16 +570,17 @@
     }
     const now = performance.now();
     const fresh = out.filter((c) => !app.revealed.has(c.el));
-    if (fresh.length && app.state.capturing) {
+    if (fresh.length && (app.state.capturing || app.reduceMotion)) {
       for (const c of fresh) app.revealed.set(c.el, now - 5e3);
+    } else if (fresh.length && app.wave && now < app.wave.grow) {
+      for (const c of fresh) app.revealed.set(c.el, WAVE);
     } else if (fresh.length) {
-      const firstOpen = now - app.openedAt < 200;
       const order = fresh.slice().sort((a, b) => a.depth - b.depth || a.dy - b.dy || a.dx - b.dx);
-      const total = firstOpen ? 1e3 : 260;
-      const step = clamp(total / order.length, firstOpen ? 1.1 : 0.5, firstOpen ? 26 : 12);
+      const total = 260;
+      const step = clamp(total / order.length, 0.5, 12);
       order.forEach((c, i) => app.revealed.set(c.el, now + Math.min(i * step, total)));
     }
-    for (const c of out) c.at = app.revealed.get(c.el) || now;
+    for (const c of out) c.at = app.revealed.get(c.el) ?? now;
     out.sort((a, b) => a.depth - b.depth);
     app.cands = out;
     app.clips = clips;
@@ -810,10 +835,10 @@
       nextId
     };
   }
-  function restoreShapes(snap) {
+  function restoreShapes(snap2) {
     for (const sp of ["page", "canvas"]) {
       const byId = new Map(app.shapes[sp].map((s) => [s.id, s]));
-      app.shapes[sp] = snap[sp].map((d) => {
+      app.shapes[sp] = snap2[sp].map((d) => {
         const s = byId.get(d.id) || {};
         return Object.assign(s, d);
       });
@@ -1083,19 +1108,19 @@
     if (!ra || !rb) return !ra && !rb;
     return ra.tx === rb.tx && ra.ty === rb.ty && ra.w === rb.w && ra.h === rb.h && ra.mr === rb.mr && ra.mb === rb.mb && ra.deleted === rb.deleted && ra.collapsed === rb.collapsed && JSON.stringify(ra.css) === JSON.stringify(rb.css);
   }
-  function restoreDom(el, snap) {
-    if (!snap.parent) {
+  function restoreDom(el, snap2) {
+    if (!snap2.parent) {
       if (el.parentNode) el.parentNode.removeChild(el);
       return;
     }
-    if (el.parentNode === snap.parent && el.nextSibling === snap.next) return;
-    if (snap.next && snap.next.parentNode === snap.parent) snap.parent.insertBefore(el, snap.next);
-    else snap.parent.appendChild(el);
+    if (el.parentNode === snap2.parent && el.nextSibling === snap2.next) return;
+    if (snap2.next && snap2.next.parentNode === snap2.parent) snap2.parent.insertBefore(el, snap2.next);
+    else snap2.parent.appendChild(el);
   }
-  function restoreState(el, snap) {
-    if (snap.style == null) el.removeAttribute("style");
-    else el.style.cssText = snap.style;
-    if (snap.rec) recs.set(el, cloneRec(snap.rec));
+  function restoreState(el, snap2) {
+    if (snap2.style == null) el.removeAttribute("style");
+    else el.style.cssText = snap2.style;
+    if (snap2.rec) recs.set(el, cloneRec(snap2.rec));
     else recs.delete(el);
   }
   function allRecs() {
@@ -1263,6 +1288,99 @@
     return { pw, ph, fs };
   }
 
+  // src/content/alike.js
+  var MAX2 = 400;
+  var cache = null;
+  function classesOf(el) {
+    return el.classList ? [...el.classList] : [];
+  }
+  function sigOf(el) {
+    if (!el) return "";
+    return el.tagName + "." + classesOf(el).sort().join(".");
+  }
+  function jaccard(a, b) {
+    if (!a.length && !b.length) return 1;
+    const B = new Set(b);
+    let both2 = 0;
+    for (const c of a) if (B.has(c)) both2++;
+    return both2 / (a.length + b.length - both2);
+  }
+  function visible(el) {
+    if (!el.isConnected || el === app.host || isOurs(el)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility !== "visible") return false;
+    } catch {
+      return false;
+    }
+    return true;
+  }
+  function matcher(el) {
+    const mine = classesOf(el);
+    const named = nameClasses(el);
+    if (named.length) {
+      const want = named.filter((c) => !/^(is-|has-)?(active|selected|current|open|show|hover|focus|disabled|checked)$/.test(c));
+      const need = want.length ? want : named;
+      return (o) => {
+        const cl = o.classList;
+        for (const c of need) if (!cl.contains(c)) return false;
+        return true;
+      };
+    }
+    if (mine.length) {
+      return (o) => jaccard(mine, classesOf(o)) >= 0.7;
+    }
+    const ps = sigOf(el.parentElement);
+    return (o) => !o.classList.length && sigOf(o.parentElement) === ps;
+  }
+  function alikeOf(el) {
+    if (!el || el.nodeType !== 1) return [];
+    const root = el.getRootNode ? el.getRootNode() : document;
+    const tag = el.tagName;
+    const match = matcher(el);
+    let pool;
+    try {
+      pool = (root.querySelectorAll ? root : document).querySelectorAll(tag.toLowerCase());
+    } catch {
+      pool = [el];
+    }
+    const found = [];
+    for (const o of pool) {
+      if (o.tagName !== tag) continue;
+      if (o !== el && !match(o)) continue;
+      if (!visible(o)) continue;
+      found.push(o);
+      if (found.length >= MAX2 * 2) break;
+    }
+    if (!found.includes(el)) found.unshift(el);
+    const out = found.filter((o) => !found.some((p) => p !== o && deepContains(p, o)));
+    out.sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return ra.top - rb.top || ra.left - rb.left;
+    });
+    return out.slice(0, MAX2);
+  }
+  function alikeCached(el) {
+    if (cache && cache.el === el && cache.at === app.lastCollect) return cache.list;
+    cache = { el, at: app.lastCollect, list: alikeOf(el) };
+    return cache.list;
+  }
+  function alikeLabel(el) {
+    const tag = el.tagName.toLowerCase();
+    const named = nameClasses(el);
+    if (named.length) return "." + named.slice(0, 2).join(".");
+    if (el.classList.length) return tag + " with the same classes";
+    const p = el.parentElement;
+    if (p) {
+      const pn = nameClasses(p);
+      return `${tag} in ${p.tagName.toLowerCase()}${pn.length ? "." + pn[0] : ""}`;
+    }
+    return tag;
+  }
+
   // src/content/render.js
   var FONT = '600 10px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
   var FONT_INFO = '600 10.5px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
@@ -1339,11 +1457,16 @@
       ctx.rect(r.x, r.y, r.w, r.h);
     }
   }
-  function chip(ctx, r, s, bg, fg, lp = 1, border = null) {
-    const sc = lp >= 1 ? 1 : 0.65 + 0.35 * easeOutBack(lp);
+  function grow(ctx, bp) {
+    if (bp >= 1) return;
+    const k = easeOutBack(bp);
+    ctx.scale(Math.max(0.01, k), Math.max(0.01, 0.45 + 0.55 * Math.min(1, easeOutCubic(bp))));
+  }
+  function chip(ctx, r, s, bg, fg, bp = 1, border = null, tp = 1) {
+    if (bp <= 0) return;
     ctx.save();
     ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
-    if (sc !== 1) ctx.scale(sc, sc);
+    grow(ctx, bp);
     ctx.beginPath();
     ctx.roundRect(-r.w / 2, -r.h / 2, r.w, r.h, 3.5);
     ctx.fillStyle = bg;
@@ -1353,16 +1476,19 @@
       ctx.strokeStyle = border;
       ctx.stroke();
     }
-    ctx.fillStyle = fg;
-    ctx.fillText(s, 0, 0.5);
+    if (tp > 0) {
+      if (tp < 1) ctx.globalAlpha *= tp;
+      ctx.fillStyle = fg;
+      ctx.fillText(s, 0, 0.5);
+    }
     ctx.restore();
   }
-  function chipV(ctx, r, s, bg, fg, lp = 1, border = null) {
-    const sc = lp >= 1 ? 1 : 0.65 + 0.35 * easeOutBack(lp);
+  function chipV(ctx, r, s, bg, fg, bp = 1, border = null, tp = 1) {
+    if (bp <= 0) return;
     ctx.save();
     ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
     ctx.rotate(Math.PI / 2);
-    if (sc !== 1) ctx.scale(sc, sc);
+    grow(ctx, bp);
     ctx.beginPath();
     ctx.roundRect(-r.h / 2, -r.w / 2, r.h, r.w, 3.5);
     ctx.fillStyle = bg;
@@ -1372,12 +1498,55 @@
       ctx.strokeStyle = border;
       ctx.stroke();
     }
-    ctx.fillStyle = fg;
-    ctx.fillText(s, 0, 0.5);
+    if (tp > 0) {
+      if (tp < 1) ctx.globalAlpha *= tp;
+      ctx.fillStyle = fg;
+      ctx.fillText(s, 0, 0.5);
+    }
     ctx.restore();
   }
   function revealP(c, now) {
     return clamp((now - c.at) / REVEAL_MS, 0, 1);
+  }
+  var WAVE_MS = 760;
+  var CHIP_MS = 220;
+  var TEXT_MS = 240;
+  var CHIP_LAG = 90;
+  var TEXT_SPREAD = 200;
+  var GLOW = 120;
+  var waveEase = (t) => 1 - Math.pow(1 - t, 2.4);
+  var waveInv = (p) => 1 - Math.pow(1 - clamp(p, 0, 1), 1 / 2.4);
+  function startWave() {
+    app.wave = null;
+    if (app.reduceMotion) return;
+    const ox = Math.max(0, app.vw - 92);
+    const oy = -40;
+    const maxR = Math.max(Math.hypot(ox, app.vh - oy), Math.hypot(app.vw - ox, app.vh - oy)) + GLOW;
+    const t0 = performance.now();
+    app.wave = { t0, ox, oy, maxR, grow: t0 + WAVE_MS, end: t0 + WAVE_MS + CHIP_LAG + CHIP_MS + TEXT_SPREAD + TEXT_MS };
+    keepAnimating(app.wave.end - t0 + 120);
+  }
+  function waveOn(now) {
+    const w = app.wave;
+    return !!w && !app.state.capturing && now < w.end;
+  }
+  function waveR(w, now) {
+    return w.maxR * waveEase(clamp((now - w.t0) / WAVE_MS, 0, 1));
+  }
+  function distNear(r, w) {
+    const dx = Math.max(r.x - w.ox, 0, w.ox - (r.x + r.w));
+    const dy = Math.max(r.y - w.oy, 0, w.oy - (r.y + r.h));
+    return Math.hypot(dx, dy);
+  }
+  function distFar(r, w) {
+    const dx = Math.max(Math.abs(r.x - w.ox), Math.abs(r.x + r.w - w.ox));
+    const dy = Math.max(Math.abs(r.y - w.oy), Math.abs(r.y + r.h - w.oy));
+    return Math.hypot(dx, dy);
+  }
+  function labelTimes(w, d) {
+    const box = w.t0 + CHIP_LAG + waveInv(d / w.maxR) * WAVE_MS;
+    const text = w.t0 + WAVE_MS + CHIP_LAG + CHIP_MS + d / w.maxR * TEXT_SPREAD;
+    return [box, text];
   }
   function draw(now) {
     const ctx = app.ctx;
@@ -1400,8 +1569,8 @@
     const editing2 = st.mode === "change" || st.mode === "draw" || st.canvasMode;
     if (guides) drawGuides(ctx, now);
     if (guides && ui && !app.drag) {
-      if (st.mode === "change") drawChangeHover(ctx);
-      else drawMeasureHover(ctx);
+      if (st.mode === "change") drawChangeHover(ctx, now);
+      else drawMeasureHover(ctx, now);
     }
     if (st.mode === "change" && guides && ui) drawFlexForSelection(ctx);
     drawShapes(ctx, now, ui);
@@ -1409,6 +1578,7 @@
       drawSelection(ctx);
       if (editing2) {
         app.arrows = computeArrows();
+        hub.refreshHot();
         drawArrows(ctx);
       } else app.arrows = [];
       drawSpacing(ctx);
@@ -1437,6 +1607,16 @@
     }
     app.occRects = occ;
     let occPath = null;
+    const w = waveOn(now) ? app.wave : null;
+    const wr = w ? waveR(w, now) : 0;
+    let glow = null;
+    if (w && wr < w.maxR - 1) {
+      glow = ctx.createRadialGradient(w.ox, w.oy, Math.max(0, wr - GLOW), w.ox, w.oy, Math.max(1, wr));
+      glow.addColorStop(0, "rgba(110,215,255,0)");
+      glow.addColorStop(0.62, "rgba(120,220,255,0.28)");
+      glow.addColorStop(0.93, "rgba(225,248,255,0.9)");
+      glow.addColorStop(1, "rgba(255,255,255,1)");
+    }
     for (const c of app.cands) {
       if (c.dup || c.w < 1 || c.h < 1) continue;
       if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
@@ -1446,13 +1626,35 @@
       if (clip && (c.x >= clip.x + clip.w || c.y >= clip.y + clip.h || c.x + c.w <= clip.x || c.y + c.h <= clip.y)) continue;
       const under = occ.length && !c.isOcc && !c.occ ? occ.filter((o) => overlapsR(o, c)) : null;
       if (under && under.some((o) => o.x <= c.x && o.y <= c.y && o.x + o.w >= c.x + c.w && o.y + o.h >= c.y + c.h)) continue;
-      const p = revealP(c, now);
-      if (p <= 0) continue;
-      const e = easeOutCubic(p);
+      const hidden = under && under.length ? under : null;
+      let e = 1;
+      let fp = 1;
+      let cut = false;
+      let lit = false;
+      const byWave = c.at === WAVE && !!w;
+      if (byWave) {
+        const dn = distNear(c, w);
+        if (dn > wr) {
+          vis.push({ c, e: 0, clip, under: hidden, show: false, wave: true });
+          continue;
+        }
+        const df = distFar(c, w);
+        cut = df > wr;
+        lit = !!glow && df > wr - GLOW;
+        fp = clamp((wr - dn) / (df - dn + 220), 0, 1);
+      } else if (c.at !== WAVE) {
+        const p = revealP(c, now);
+        if (p <= 0) {
+          vis.push({ c, e: 0, clip, under: hidden, show: false });
+          continue;
+        }
+        e = easeOutCubic(p);
+        fp = clamp((e - 0.2) / 0.8, 0, 1);
+      }
       const col = hueFor(c.depth, mode);
       const clipped = clip && !(c.x >= clip.x && c.y >= clip.y && c.x + c.w <= clip.x + clip.w && c.y + c.h <= clip.y + clip.h);
-      const hidden = under && under.length;
-      if (clipped || hidden) {
+      const saved = clipped || hidden || cut;
+      if (saved) {
         ctx.save();
         if (clipped) {
           ctx.beginPath();
@@ -1470,12 +1672,19 @@
       }
       ctx.beginPath();
       boxPath(ctx, c, c.rad, c.circle);
-      const fp = clamp((e - 0.2) / 0.8, 0, 1);
       if (fill > 1e-3 && fp > 0) {
         ctx.fillStyle = hsla(col, fill * fp);
         ctx.fill();
       }
-      const op = clamp(e / 0.72, 0, 1);
+      if (cut) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(w.ox, w.oy, wr, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.beginPath();
+        boxPath(ctx, c, c.rad, c.circle);
+      }
+      const op = byWave ? 1 : clamp(e / 0.72, 0, 1);
       if (op < 1) {
         const per = 2 * (c.w + c.h);
         ctx.setLineDash([per * op, per + 20]);
@@ -1484,15 +1693,21 @@
       ctx.strokeStyle = hsla(col, change ? 0.5 : 0.85);
       ctx.stroke();
       ctx.setLineDash([]);
-      if (clipped || hidden) ctx.restore();
-      vis.push({ c, e, clip, under: hidden ? under : null });
+      if (lit) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = glow;
+        ctx.stroke();
+      }
+      if (cut) ctx.restore();
+      if (saved) ctx.restore();
+      vis.push({ c, e, clip, under: hidden, show: true, wave: byWave });
     }
-    drawLabels(ctx, vis, mode);
+    drawLabels(ctx, vis, mode, now, w);
   }
   function overlapsR(a, b) {
     return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
   }
-  function drawLabels(ctx, vis, mode) {
+  function drawLabels(ctx, vis, mode, now, w) {
     const grid = new Grid(48);
     if (app.uiRect) grid.tryAdd(app.uiRect, 0);
     const view = { x: 0, y: 0, w: app.vw, h: app.vh };
@@ -1504,22 +1719,35 @@
       if (t) words.add(t);
     }
     ctx.font = FONT;
+    const prog = (v, r) => {
+      if (v.wave && w) {
+        const [tb, tt] = labelTimes(w, Math.hypot(r.x + r.w / 2 - w.ox, r.y + r.h / 2 - w.oy));
+        return [clamp((now - tb) / CHIP_MS, 0, 1), clamp((now - tt) / TEXT_MS, 0, 1)];
+      }
+      if (!v.show) return [0, 0];
+      return [clamp((v.e - 0.42) / 0.34, 0, 1), clamp((v.e - 0.7) / 0.3, 0, 1)];
+    };
     for (const v of vis) {
       const c = v.c;
-      const lp = clamp((v.e - 0.45) / 0.55, 0, 1);
-      if (lp <= 0) continue;
       let bound = intersect(c, view);
       if (bound && v.clip) bound = intersect(bound, v.clip);
       if (!bound) continue;
       const col = hueFor(c.depth, mode);
-      const a = (mode === "change" ? 0.8 : 0.95) * lp;
+      const a = mode === "change" ? 0.8 : 0.95;
       const bg = hsla(col, a, -8);
-      const fg = `rgba(255,255,255,${Math.min(1, a + 0.05)})`;
+      const fg = "rgba(255,255,255,1)";
+      const put = (vertical, r, s) => {
+        const [bp, tp] = prog(v, r);
+        if (bp <= 0) return;
+        const b = tp >= 1 ? bg : hsla(col, a * (0.5 + 0.5 * tp), -8 + 14 * (1 - tp));
+        if (vertical) chipV(ctx, r, s, b, fg, bp, null, tp);
+        else chip(ctx, r, s, b, fg, bp, null, tp);
+      };
       if (c.circle) {
         const s = "⌀ " + fmt(c.w, "w", c);
-        const w = tw(ctx, s) + 8;
-        const r = { x: bound.x + bound.w / 2 - w / 2, y: bound.y + bound.h / 2 - CHIP_H / 2, w, h: CHIP_H };
-        if (bound.w >= w + 2 && bound.h >= CHIP_H && !words.hits(r, 0.5) && grid.tryAdd(r)) chip(ctx, r, s, bg, fg, lp);
+        const cw = tw(ctx, s) + 8;
+        const r = { x: bound.x + bound.w / 2 - cw / 2, y: bound.y + bound.h / 2 - CHIP_H / 2, w: cw, h: CHIP_H };
+        if (bound.w >= cw + 2 && bound.h >= CHIP_H && !words.hits(r, 0.5) && grid.tryAdd(r)) put(false, r, s);
         continue;
       }
       const ok = (r) => {
@@ -1555,7 +1783,7 @@
         for (const sp of spots) {
           const r = { x: sp.x, y: sp.y, w: wW, h: CHIP_H };
           if (ok(r)) {
-            chip(ctx, r, ws, bg, fg, lp);
+            put(false, r, ws);
             wAtRight = !!sp.right;
             break;
           }
@@ -1577,7 +1805,7 @@
         for (const x of spots) {
           const r = { x, y, w: CHIP_H, h: hW };
           if (ok(r)) {
-            chipV(ctx, r, hs, bg, fg, lp);
+            put(true, r, hs);
             break;
           }
         }
@@ -1614,13 +1842,38 @@
     ctx.font = FONT;
   }
   function elInfo(el, r, c) {
-    const tag = el.tagName.toLowerCase();
-    let s = `${tag}   ${fmt(r.w, "w", c)} × ${fmt(r.h, "h", c)}`;
+    let s = `${describe(el)}   ${fmt(r.w, "w", c)} × ${fmt(r.h, "h", c)}`;
     if (c && c.text && c.fs) s += `   ·   ${Math.round(c.fs)}px text`;
-    if (c && c.circle) s = `${tag}   ⌀ ${fmt(r.w, "w", c)}`;
+    if (c && c.circle) s = `${describe(el)}   ⌀ ${fmt(r.w, "w", c)}`;
     return s;
   }
-  function drawMeasureHover(ctx) {
+  var pop = { el: null, t0: 0 };
+  function popped(el, r, now) {
+    if (pop.el !== el) {
+      pop.el = el;
+      pop.t0 = now;
+      keepAnimating(220);
+    }
+    const e = easeOutCubic(clamp((now - pop.t0) / 170, 0, 1));
+    const k = (1 - e) * 6;
+    return { r: { x: r.x - k, y: r.y - k, w: r.w + 2 * k, h: r.h + 2 * k }, e, k };
+  }
+  function hoverBox(ctx, el, r, c, col, now, strong) {
+    const P = popped(el, r, now);
+    ctx.save();
+    ctx.beginPath();
+    boxPath(ctx, P.r, (c.rad || 0) + P.k, c.circle);
+    ctx.fillStyle = hsla(col, (strong ? 0.16 : 0.1) + app.state.fill * 0.3);
+    ctx.fill();
+    ctx.lineWidth = strong ? 5.5 : 4;
+    ctx.strokeStyle = `rgba(255,255,255,${(strong ? 0.85 : 0.6) * P.e})`;
+    ctx.stroke();
+    ctx.lineWidth = strong ? 2.5 : 2;
+    ctx.strokeStyle = hsla(col, 1);
+    ctx.stroke();
+    ctx.restore();
+  }
+  function drawMeasureHover(ctx, now) {
     const h = app.hover;
     if (!h || h.kind !== "el" || !h.el.isConnected) return;
     const el = h.el;
@@ -1628,35 +1881,67 @@
     if (r.w < 1 || r.h < 1) return;
     const c = app.candByEl.get(el) || itemCtx(h);
     const col = [217, 96, 54];
-    ctx.beginPath();
-    boxPath(ctx, r, c.rad || 0, c.circle);
-    ctx.fillStyle = hsla(col, 0.1 + app.state.fill * 0.3);
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = hsla(col, 1);
-    ctx.stroke();
+    hoverBox(ctx, el, r, c, col, now, false);
     const p = parentBox(el);
     if (p) drawInnerDistances(ctx, r, p.r, c, el);
     infoChip(ctx, r, elInfo(el, r, c), hsla(col, 0.97, -10));
   }
-  function drawChangeHover(ctx) {
+  var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+  var MOD_NAME = MAC ? "Ctrl/⌘" : "Ctrl";
+  function climbTarget(el) {
+    const cur2 = app.sel.length === 1 && app.sel[0].kind === "el" ? app.sel[0].el : null;
+    if (cur2 && cur2.isConnected && deepContains(cur2, el)) return parentPick(cur2) || cur2;
+    return el;
+  }
+  function alikeBase(el) {
+    const cur2 = app.sel.length === 1 && app.sel[0].kind === "el" ? app.sel[0].el : null;
+    return cur2 && cur2.isConnected && deepContains(cur2, el) ? cur2 : el;
+  }
+  function drawChangeHover(ctx, now) {
     const h = app.hover;
-    if (!h) return;
-    if (h.kind === "el") {
-      if (!h.el.isConnected) return;
-      const r = rectOf(h.el);
-      const c = app.candByEl.get(h.el) || itemCtx(h);
-      const col = [270, 88, 58];
+    if (!h || h.kind !== "el" || !h.el.isConnected) return;
+    const el = h.el;
+    const mods = app.mods;
+    const col = [270, 88, 58];
+    if (mods.mod && mods.shift) return drawAlikePreview(ctx, el, now);
+    let target = el;
+    if (mods.mod) target = climbTarget(el);
+    const r = rectOf(target);
+    if (r.w < 1 || r.h < 1) return;
+    const c = app.candByEl.get(target) || itemCtx(elItem(target));
+    hoverBox(ctx, target, r, c, col, now, true);
+    if (c.flex || c.grid) drawFlexGaps(ctx, target, r, c);
+    const picked = app.sel.some((s) => s.kind === "el" && s.el === target);
+    if (mods.mod && target !== el) infoChip(ctx, r, `${MOD_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
+    else if (!picked) infoChip(ctx, r, elInfo(target, r, c), hsla(col, 0.97, -12));
+  }
+  function drawAlikePreview(ctx, el, now) {
+    const base = alikeBase(el);
+    const list = alikeCached(base);
+    const col = [292, 84, 60];
+    ctx.save();
+    for (const o of list) {
+      if (!o.isConnected) continue;
+      const r3 = rectOf(o);
+      if (r3.x > app.vw || r3.y > app.vh || r3.x + r3.w < 0 || r3.y + r3.h < 0) continue;
+      const c = app.candByEl.get(o) || { rad: 0 };
       ctx.beginPath();
-      boxPath(ctx, r, c.rad || 0, c.circle);
-      ctx.fillStyle = hsla(col, 0.12 + app.state.fill * 0.3);
+      boxPath(ctx, r3, c.rad || 0, c.circle);
+      ctx.fillStyle = hsla(col, 0.14);
       ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(255,255,255,0.7)";
+      ctx.stroke();
       ctx.lineWidth = 2;
       ctx.strokeStyle = hsla(col, 1);
       ctx.stroke();
-      if (c.flex || c.grid) drawFlexGaps(ctx, h.el, r, c);
-      if (!app.sel.some((s) => s.kind === "el" && s.el === h.el)) infoChip(ctx, r, elInfo(h.el, r, c), hsla(col, 0.97, -12));
     }
+    ctx.restore();
+    const r = rectOf(base);
+    const n = list.length;
+    const s = n > 1 ? `${MOD_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
+    infoChip(ctx, r, s, hsla(col, 0.97, -18));
+    popped(base, r, now);
   }
   function neighbourEdges(el, r, pr) {
     let L = pr.x;
@@ -1986,59 +2271,145 @@
       if (it) app.chips.push({ ...wr, it, axis: "w" }, { ...hr, it, axis: "h" });
     }
   }
+  function edgePoints(r) {
+    return [
+      ["t", r.x + r.w / 2, r.y],
+      ["b", r.x + r.w / 2, r.y + r.h],
+      ["l", r.x, r.y + r.h / 2],
+      ["r", r.x + r.w, r.y + r.h / 2]
+    ];
+  }
+  function alongEdge(r, edge, f = 0.5) {
+    if (edge === "t" || edge === "b") return [r.x + r.w * f, edge === "t" ? r.y : r.y + r.h];
+    return [edge === "l" ? r.x : r.x + r.w, r.y + r.h * f];
+  }
+  function edgeLine(r, edge) {
+    if (edge === "t") return [r.x, r.y, r.x + r.w, r.y];
+    if (edge === "b") return [r.x, r.y + r.h, r.x + r.w, r.y + r.h];
+    if (edge === "l") return [r.x, r.y, r.x, r.y + r.h];
+    return [r.x + r.w, r.y, r.x + r.w, r.y + r.h];
+  }
+  function isCrowded(list) {
+    const pts = [];
+    for (const a of list) if (!pts.some((p) => Math.abs(p.x - a.x) < 3 && Math.abs(p.y - a.y) < 3)) pts.push(a);
+    if (pts.length > 9) return true;
+    let close2 = 0;
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) < 18) close2++;
+    }
+    return close2 >= 3;
+  }
+  function edgeUnderCursor(mx, my, pageEls, crowded) {
+    let best = null;
+    const test = (r3, info2) => {
+      if (r3.w < 4 || r3.h < 4) return;
+      const inside = mx >= r3.x && mx <= r3.x + r3.w && my >= r3.y && my <= r3.y + r3.h;
+      const tolX = info2.sel ? 6 : clamp(r3.w * 0.16, 2, 5);
+      const tolY = info2.sel ? 6 : clamp(r3.h * 0.16, 2, 5);
+      const inX = mx >= r3.x - 1 && mx <= r3.x + r3.w + 1;
+      const inY = my >= r3.y - 1 && my <= r3.y + r3.h + 1;
+      const opts = [];
+      if (inX) opts.push(["t", Math.abs(my - r3.y), tolY], ["b", Math.abs(my - (r3.y + r3.h)), tolY]);
+      if (inY) opts.push(["l", Math.abs(mx - r3.x), tolX], ["r", Math.abs(mx - (r3.x + r3.w)), tolX]);
+      for (const [edge2, dist, tol] of opts) {
+        if (dist > tol) continue;
+        const score = dist - (info2.sel ? 8 : 0) - (inside ? 1.5 : 0) + Math.sqrt(r3.w * r3.h) * 2e-3;
+        if (!best || score < best.score) best = { score, edge: edge2, r: r3, info: info2 };
+      }
+    };
+    let inSel = false;
+    for (const it2 of app.sel) {
+      if (it2.kind === "el" && !it2.el.isConnected) continue;
+      const r3 = itemRect(it2);
+      if (containsPt(r3, mx, my)) inSel = true;
+      test(r3, { sel: true, it: it2 });
+    }
+    if (crowded && !inSel) for (const s of activeShapes()) test(shapeRect(s), { it: shapeItem(s) });
+    if (pageEls && crowded && !inSel) {
+      const onBar = app.occRects && app.occRects.some((o) => containsPt(o, mx, my));
+      for (const c of app.cands) {
+        if (c.dup || c.w < 6 || c.h < 6) continue;
+        if (c.x > mx + 8 || c.x + c.w < mx - 8 || c.y > my + 8 || c.y + c.h < my - 8) continue;
+        if (onBar && !c.isOcc && !c.occ) continue;
+        if (c.clip) {
+          const k = clipRect(c.clip);
+          if (k === false || k && !containsPt(k, mx, my, 2)) continue;
+        }
+        test(c, { el: c.el });
+      }
+    }
+    if (!best) return null;
+    const { edge, r, info } = best;
+    const horiz = edge === "t" || edge === "b";
+    const len = horiz ? r.w : r.h;
+    let f = 0.5;
+    if (len > 16) f = clamp((horiz ? mx - r.x : my - r.y) / len, 6 / len, 1 - 6 / len);
+    const [x, y] = alongEdge(r, edge, f);
+    const it = info.it || elItem(info.el);
+    return { it, edge, x, y, f, d: 0, exact: true, sel: !!info.sel, line: edgeLine(r, edge) };
+  }
   function computeArrows() {
     const out = [];
     const m = app.mouse;
+    app.crowded = false;
     if (!m.inside || app.state.capturing) return out;
     const d = app.drag;
     if (d && d.type !== "pending") {
       if (d.type === "edge") {
-        const r = itemRect(d.items[0].it);
-        const e = d.edge;
-        const pt = e === "t" ? [r.x + r.w / 2, r.y] : e === "b" ? [r.x + r.w / 2, r.y + r.h] : e === "l" ? [r.x, r.y + r.h / 2] : [r.x + r.w, r.y + r.h / 2];
-        out.push({ it: d.items[0].it, edge: e, x: pt[0], y: pt[1], d: 0, hot: true });
+        const it = d.main || d.items[0].it;
+        const r = itemRect(it);
+        const [x, y] = alongEdge(r, d.edge, d.f == null ? 0.5 : d.f);
+        out.push({ it, edge: d.edge, x, y, d: 0, hot: true, line: d.exact ? edgeLine(r, d.edge) : null });
       }
       return out;
     }
     const R2 = Math.min(app.vw * 0.1, 170);
     const W = app.vw;
     const H = app.vh;
-    const push = (it, r) => {
-      const pts = [
-        ["t", r.x + r.w / 2, r.y],
-        ["b", r.x + r.w / 2, r.y + r.h],
-        ["l", r.x, r.y + r.h / 2],
-        ["r", r.x + r.w, r.y + r.h / 2]
-      ];
-      for (const [edge, x, y] of pts) {
+    const near = [];
+    const push = (it, r, key) => {
+      for (const [edge, x, y] of edgePoints(r)) {
         const dd = Math.hypot(x - m.x, y - m.y);
-        if (dd < R2) out.push({ it: typeof it === "function" ? it() : it, edge, x, y, d: dd });
+        if (dd < R2) near.push({ it, key, edge, x, y, d: dd });
       }
     };
-    for (const s of activeShapes()) push(shapeItem(s), shapeRect(s));
-    if (app.state.mode === "change" && !app.state.canvasMode && app.state.guides) {
+    for (const s of activeShapes()) push(shapeItem(s), shapeRect(s), s);
+    const pageEls = app.state.mode === "change" && !app.state.canvasMode && app.state.guides;
+    if (pageEls) {
       for (const c of app.cands) {
         if (c.dup || c.w < 10 || c.h < 10) continue;
         if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
         if (c.x > m.x + R2 || c.x + c.w < m.x - R2 || c.y > m.y + R2 || c.y + c.h < m.y - R2) continue;
-        const el = c.el;
-        push(() => elItem(el), c);
+        push(null, c, c.el);
       }
     }
+    const selA = [];
     for (const it of app.sel) {
       if (it.kind === "el" && !it.el.isConnected) continue;
-      const r = itemRect(it);
-      const pts = [["t", r.x + r.w / 2, r.y], ["b", r.x + r.w / 2, r.y + r.h], ["l", r.x, r.y + r.h / 2], ["r", r.x + r.w, r.y + r.h / 2]];
-      for (const [edge, x, y] of pts) out.push({ it, edge, x, y, d: Math.min(R2 * 0.5, Math.hypot(x - m.x, y - m.y)), sel: true });
+      for (const [edge, x, y] of edgePoints(itemRect(it))) selA.push({ it, edge, x, y, d: Math.min(R2 * 0.5, Math.hypot(x - m.x, y - m.y)), sel: true });
     }
-    out.sort((a, b) => (a.sel ? 0 : 1) - (b.sel ? 0 : 1) || a.d - b.d);
-    const res = [];
-    for (const a of out) {
-      if (res.length >= 30) break;
-      if (res.some((b) => Math.abs(b.x - a.x) < 9 && Math.abs(b.y - a.y) < 9)) continue;
-      res.push(a);
+    const crowded = isCrowded(near);
+    app.crowded = crowded;
+    const exact = edgeUnderCursor(m.x, m.y, pageEls, crowded);
+    let list;
+    if (crowded) {
+      list = selA;
+    } else {
+      list = selA.concat(near);
     }
-    return res;
+    if (exact) {
+      const key = exact.it.kind === "el" ? exact.it.el : exact.it.shape;
+      list = list.filter((a) => a.edge !== exact.edge || (a.it ? a.it.kind === "el" ? a.it.el : a.it.shape : a.key) !== key);
+      list.push(exact);
+    }
+    list.sort((a, b) => (a.exact ? 0 : 1) - (b.exact ? 0 : 1) || (a.sel ? 0 : 1) - (b.sel ? 0 : 1) || a.d - b.d);
+    for (const a of list) {
+      if (out.length >= 30) break;
+      if (out.some((b) => Math.abs(b.x - a.x) < 9 && Math.abs(b.y - a.y) < 9)) continue;
+      if (!a.it) a.it = a.key && a.key.nodeType === 1 ? elItem(a.key) : shapeItem(a.key);
+      out.push(a);
+    }
+    return out;
   }
   function tri(ctx, tx, ty, dx, dy, s) {
     const bx = tx - dx * s * 1.25;
@@ -2057,11 +2428,26 @@
     const R2 = Math.min(app.vw * 0.1, 170);
     const hot = app.hot && app.hot.type === "edge" ? app.hot : null;
     const change = app.state.mode === "change";
+    const solid = change ? PURPLE_SEL : BLUE_SEL;
     ctx.save();
+    for (const a of app.arrows) {
+      if (!a.line) continue;
+      ctx.globalAlpha = 1;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(a.line[0], a.line[1]);
+      ctx.lineTo(a.line[2], a.line[3]);
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.stroke();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = solid;
+      ctx.stroke();
+    }
     ctx.lineWidth = 1;
     ctx.strokeStyle = "rgba(255,255,255,0.9)";
     for (const a of app.arrows) {
-      const isHot = a.hot || hot && hot.x === a.x && hot.y === a.y;
+      const isHot = a.hot || a.exact || hot && hot.edge === a.edge && same(hot.it, a.it);
       const alpha = isHot ? 1 : clamp(1 - a.d / R2, 0.18, 0.95);
       const s = isHot ? 5.5 : 4.2;
       const gap = 2.5;
@@ -2954,8 +3340,137 @@
     return lines.join("\n");
   }
 
+  // src/content/png.js
+  var CRC = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 4294967295;
+    for (let i = 0; i < bytes.length; i++) c = CRC[(c ^ bytes[i]) & 255] ^ c >>> 8;
+    return (c ^ 4294967295) >>> 0;
+  }
+  function chunk(type, data) {
+    const out = new Uint8Array(12 + data.length);
+    const dv = new DataView(out.buffer);
+    dv.setUint32(0, data.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+    out.set(data, 8);
+    dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+    return out;
+  }
+  var PngWriter = class {
+    constructor(width, height) {
+      this.w = width;
+      this.h = height;
+      this.rows = 0;
+      this.prev = new Uint8Array(width * 3);
+      const cs = new CompressionStream("deflate");
+      this.writer = cs.writable.getWriter();
+      this.parts = [];
+      const reader = cs.readable.getReader();
+      this.drained = (async () => {
+        for (; ; ) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          this.parts.push(value);
+        }
+      })();
+    }
+    // rgba: pixels straight from getImageData (width × rows × 4). Stored as RGB: screenshots are opaque.
+    async addRows(rgba, rows) {
+      const w = this.w;
+      const line = 1 + w * 3;
+      const out = new Uint8Array(line * rows);
+      const prev = this.prev;
+      for (let y = 0; y < rows; y++) {
+        let o = y * line;
+        out[o++] = 2;
+        let si = y * w * 4;
+        for (let p = 0; p < w * 3; p += 3) {
+          const r = rgba[si];
+          const g = rgba[si + 1];
+          const b = rgba[si + 2];
+          out[o] = r - prev[p];
+          out[o + 1] = g - prev[p + 1];
+          out[o + 2] = b - prev[p + 2];
+          prev[p] = r;
+          prev[p + 1] = g;
+          prev[p + 2] = b;
+          o += 3;
+          si += 4;
+        }
+      }
+      this.rows += rows;
+      await this.writer.write(out);
+    }
+    async finish() {
+      if (this.rows !== this.h) throw new Error(`PNG got ${this.rows} of ${this.h} rows`);
+      await this.writer.close();
+      await this.drained;
+      const ihdr = new Uint8Array(13);
+      const dv = new DataView(ihdr.buffer);
+      dv.setUint32(0, this.w);
+      dv.setUint32(4, this.h);
+      ihdr[8] = 8;
+      ihdr[9] = 2;
+      const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr)];
+      let pending = [];
+      let size = 0;
+      const flush = () => {
+        if (!size) return;
+        const data = new Uint8Array(size);
+        let o = 0;
+        for (const p of pending) {
+          data.set(p, o);
+          o += p.length;
+        }
+        parts.push(chunk("IDAT", data));
+        pending = [];
+        size = 0;
+      };
+      for (const p of this.parts) {
+        pending.push(p);
+        size += p.length;
+        if (size >= 1 << 20) flush();
+      }
+      flush();
+      parts.push(chunk("IEND", new Uint8Array(0)));
+      this.parts = [];
+      return new Blob(parts, { type: "image/png" });
+    }
+  };
+
   // src/content/capture.js
+  var GAP = 560;
+  var MAX_SLICES = 150;
+  var MAX_CSS_H = 25e4;
+  var CANVAS_MAX_H = 16384;
+  var CANVAS_MAX_AREA = 8e7;
   var lastCapture = 0;
+  var stopFlag = false;
+  var Stopped = class extends Error {
+    constructor() {
+      super("Screenshot stopped");
+      this.stopped = true;
+    }
+  };
+  function stopCapture() {
+    stopFlag = true;
+  }
+  var NOHUD = { show() {
+  }, hide() {
+  }, phase() {
+  }, progress() {
+  }, snap() {
+  }, previewStart() {
+  }, previewDraw() {
+  } };
   function dataUrlToBlob(url) {
     const comma = url.indexOf(",");
     const meta = url.slice(5, comma);
@@ -2964,17 +3479,28 @@
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return new Blob([bytes], { type: meta.split(";")[0] || "image/png" });
   }
-  async function rawCapture() {
-    const wait = 560 - (performance.now() - lastCapture);
+  async function waitSlot() {
+    const wait = GAP - (performance.now() - lastCapture);
     if (wait > 0) await sleep(wait);
-    lastCapture = performance.now();
-    const res = await chrome.runtime.sendMessage({ type: "pd:capture" });
-    if (!res || !res.ok) throw new Error(res && res.error || "Screenshot failed");
-    return res.dataUrl;
+  }
+  async function grab() {
+    for (let attempt = 0; ; attempt++) {
+      await waitSlot();
+      lastCapture = performance.now();
+      const res = await chrome.runtime.sendMessage({ type: "pd:capture" });
+      if (res && res.ok) return res.dataUrl;
+      const err = res && res.error || "Screenshot failed";
+      if (attempt < 2 && /MAX_CAPTURE|quota|per second/i.test(err)) {
+        await sleep(700);
+        continue;
+      }
+      throw new Error(err);
+    }
   }
   async function prepare() {
     app.state.capturing = true;
     app.root.classList.add("capturing");
+    app.wave = null;
     const done = performance.now() - 5e3;
     for (const c of app.cands) if (c.at > done) c.at = done;
     requestFull();
@@ -2988,14 +3514,117 @@
   async function captureVisible() {
     await prepare();
     try {
-      const url = await rawCapture();
-      return dataUrlToBlob(url);
+      return dataUrlToBlob(await grab());
     } finally {
       unprepare();
     }
   }
-  function hideFixed() {
-    const hidden = [];
+  function docScroller() {
+    const de = document.documentElement;
+    const se = document.scrollingElement || de;
+    const quirks = document.compatMode === "BackCompat" && document.body;
+    const x0 = window.scrollX;
+    return {
+      kind: "doc",
+      el: se,
+      top: () => window.scrollY,
+      to: (y) => window.scrollTo({ left: x0, top: y, behavior: "instant" }),
+      height: () => se.scrollHeight,
+      view: () => {
+        let w = quirks ? document.body.clientWidth : de.clientWidth;
+        let h = quirks ? document.body.clientHeight : de.clientHeight;
+        if (!(w > 0 && w <= window.innerWidth)) w = window.innerWidth;
+        if (!(h > 0 && h <= window.innerHeight)) h = window.innerHeight;
+        return { x: 0, y: 0, w, h };
+      }
+    };
+  }
+  function elScroller(el) {
+    return {
+      kind: "el",
+      el,
+      top: () => el.scrollTop,
+      to: (y) => el.scrollTo({ left: el.scrollLeft, top: y, behavior: "instant" }),
+      height: () => el.scrollHeight,
+      view: () => {
+        const r = el.getBoundingClientRect();
+        return { x: r.left + el.clientLeft, y: r.top + el.clientTop, w: el.clientWidth, h: el.clientHeight };
+      }
+    };
+  }
+  function pickScroller() {
+    const doc = docScroller();
+    if (doc.height() - doc.view().h > 4) return doc;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let best = null;
+    const seen = /* @__PURE__ */ new Set();
+    for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.55], [0.7, 0.55], [0.5, 0.8], [0.5, 0.3]]) {
+      let list;
+      try {
+        list = document.elementsFromPoint(vw * fx, vh * fy);
+      } catch {
+        continue;
+      }
+      const hit = list.find((e) => e !== app.host && !isOurs(e));
+      for (let e = hit; e && e !== document.documentElement; e = parentOf(e)) {
+        if (seen.has(e)) continue;
+        seen.add(e);
+        if (e.scrollHeight - e.clientHeight < 8) continue;
+        let oy;
+        try {
+          oy = getComputedStyle(e).overflowY;
+        } catch {
+          continue;
+        }
+        if (oy !== "auto" && oy !== "scroll" && oy !== "overlay") continue;
+        const r = e.getBoundingClientRect();
+        const w = Math.min(r.right, vw) - Math.max(r.left, 0);
+        const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        if (w <= 0 || h <= 0 || w * h < vw * vh * 0.18) continue;
+        if (r.top < -1 || r.bottom > vh + 1) continue;
+        if (!best || w * h > best.area) best = { e, area: w * h };
+      }
+    }
+    return best ? elScroller(best.e) : null;
+  }
+  var Saver = class {
+    constructor() {
+      this.list = [];
+    }
+    set(el, prop, val) {
+      this.list.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)]);
+      el.style.setProperty(prop, val, "important");
+    }
+    restore() {
+      for (let i = this.list.length - 1; i >= 0; i--) {
+        const [el, p, v, pr] = this.list[i];
+        if (v) el.style.setProperty(p, v, pr);
+        else el.style.removeProperty(p);
+      }
+      this.list = [];
+    }
+  };
+  function hideScrollbar(sc, keep) {
+    if (sc.kind === "doc") {
+      const de = document.documentElement;
+      if (window.innerWidth - de.clientWidth <= 0) keep.set(de, "scrollbar-width", "none");
+      return;
+    }
+    const el = sc.el;
+    let cs;
+    try {
+      cs = getComputedStyle(el);
+    } catch {
+      return;
+    }
+    const gutter = el.offsetWidth - el.clientWidth - parseFloat(cs.borderLeftWidth || 0) - parseFloat(cs.borderRightWidth || 0);
+    if (gutter < 0.5) keep.set(el, "scrollbar-width", "none");
+    else keep.set(el, "scrollbar-color", "transparent transparent");
+  }
+  function scanPositioned() {
+    const sticky = [];
+    const fixed = [];
     const all = document.body ? document.body.querySelectorAll("*") : [];
     for (const el of all) {
       if (el === app.host) continue;
@@ -3005,80 +3634,396 @@
       } catch {
         continue;
       }
-      if (pos !== "fixed" && pos !== "sticky") continue;
-      hidden.push([el, el.style.getPropertyValue("visibility"), el.style.getPropertyPriority("visibility")]);
-      el.style.setProperty("visibility", "hidden", "important");
+      if (pos === "sticky" || pos === "-webkit-sticky") sticky.push(el);
+      else if (pos === "fixed") fixed.push(el);
     }
-    const set = app.hiddenForCapture;
-    for (const [el] of hidden) {
-      set.add(el);
-      for (const c of app.cands) if (deepContains(el, c.el)) set.add(c.el);
-    }
-    return hidden;
+    return { sticky, fixed };
   }
-  function unhide(hidden) {
-    for (const [el, v, p] of hidden) {
-      if (v) el.style.setProperty("visibility", v, p);
-      else el.style.removeProperty("visibility");
-    }
-    app.hiddenForCapture.clear();
-  }
-  async function captureFull() {
-    if (app.state.canvasMode) return captureVisible();
-    const se = document.scrollingElement || document.documentElement;
-    const totalH = Math.max(se.scrollHeight, document.body ? document.body.scrollHeight : 0);
-    const vh = window.innerHeight;
-    const vw = window.innerWidth;
-    if (totalH <= vh + 2) return captureVisible();
-    const ox = window.scrollX;
-    const oy = window.scrollY;
-    const html = document.documentElement;
-    const prevBehavior = [html.style.getPropertyValue("scroll-behavior"), html.style.getPropertyPriority("scroll-behavior")];
-    html.style.setProperty("scroll-behavior", "auto", "important");
-    await prepare();
-    const slices = [];
-    let hidden = [];
+  function paintsItself(el) {
+    const tag = el.tagName;
+    if (tag === "IMG" || tag === "VIDEO" || tag === "CANVAS" || tag === "svg" || tag === "PICTURE") return true;
+    let cs;
     try {
-      let y = 0;
-      for (let i = 0; i < 80; i++) {
-        window.scrollTo({ left: ox, top: y, behavior: "instant" });
-        await frames(2);
-        await sleep(i === 0 ? 80 : 180);
-        if (i === 1) {
-          hidden = hideFixed();
-          requestFull();
-          await frames(2);
-        }
-        requestFull();
-        await frames(1);
-        const actualY = window.scrollY;
-        slices.push({ y: actualY, url: await rawCapture() });
-        if (actualY + vh >= totalH - 1) break;
-        y = actualY + vh;
+      cs = getComputedStyle(el);
+    } catch {
+      return false;
+    }
+    if (cs.backgroundImage && cs.backgroundImage !== "none") return true;
+    const m = /rgba?\(([^)]+)\)/.exec(cs.backgroundColor || "");
+    if (!m) return false;
+    const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+    const a = parts.length >= 4 ? parseFloat(parts[3]) * (parts[3].endsWith("%") ? 0.01 : 1) : 1;
+    return a > 0.05;
+  }
+  function behindContent(el, r) {
+    const x1 = Math.max(r.left, 0);
+    const x2 = Math.min(r.right, window.innerWidth);
+    const y1 = Math.max(r.top, 0);
+    const y2 = Math.min(r.bottom, window.innerHeight);
+    let front = 0;
+    for (const [fx, fy] of [[0.5, 0.5], [0.2, 0.3], [0.8, 0.7]]) {
+      let top = null;
+      try {
+        top = document.elementsFromPoint(x1 + (x2 - x1) * fx, y1 + (y2 - y1) * fy).find((e) => e !== app.host && !isOurs(e)) || null;
+      } catch {
       }
+      if (top && (top === el || deepContains(el, top))) front++;
+    }
+    return front < 2;
+  }
+  function classifyFixed(list) {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const out = [];
+    for (const el of list) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) continue;
+      if (paintsItself(el) && behindContent(el, r)) continue;
+      out.push({ el, bottom: r.top + r.height / 2 > vh * 0.55 && r.height < vh * 0.7 });
+    }
+    return out;
+  }
+  var Hider = class {
+    constructor(items) {
+      this.items = items.map((it) => ({ ...it, v: it.el.style.getPropertyValue("visibility"), p: it.el.style.getPropertyPriority("visibility"), off: false }));
+    }
+    set(it, off) {
+      if (it.off === off) return;
+      it.off = off;
+      if (off) it.el.style.setProperty("visibility", "hidden", "important");
+      else if (it.v) it.el.style.setProperty("visibility", it.v, it.p);
+      else it.el.style.removeProperty("visibility");
+    }
+    // which: 'all' | 'first' | 'last' | 'none'
+    show(which) {
+      for (const it of this.items) {
+        const on = which === "all" || which === "first" && !it.bottom || which === "last" && it.bottom;
+        this.set(it, !on);
+      }
+      const set = app.hiddenForCapture;
+      set.clear();
+      for (const it of this.items) {
+        if (!it.off) continue;
+        set.add(it.el);
+        for (const c of app.cands) if (deepContains(it.el, c.el)) set.add(c.el);
+      }
+    }
+    restore() {
+      for (const it of this.items) this.set(it, false);
+      app.hiddenForCapture.clear();
+    }
+  };
+  async function waitImages(ms) {
+    const t0 = performance.now();
+    for (; ; ) {
+      let pending = 0;
+      for (const img of document.images) {
+        if (img.complete) continue;
+        const r = img.getBoundingClientRect();
+        if (r.width < 1 || r.bottom < 0 || r.top > window.innerHeight) continue;
+        pending++;
+      }
+      if (!pending || performance.now() - t0 > ms) return;
+      await sleep(80);
+    }
+  }
+  async function loadPass(sc, hud2, check) {
+    const view = sc.view();
+    const H = sc.height();
+    if (H - view.h < 4) return;
+    hud2.phase("Loading the whole page…");
+    const n = Math.min(60, Math.ceil((H - view.h) / view.h));
+    for (let i = 1; i <= n; i++) {
+      check();
+      sc.to(Math.min(H - view.h, i * view.h));
+      await frames(1);
+      await sleep(100);
+      hud2.progress(0.02 + 0.2 * (i / n));
+    }
+    await waitImages(1500);
+    sc.to(0);
+    await frames(2);
+    await sleep(200);
+  }
+  var Stitcher = class {
+    constructor(W, H, hud2) {
+      this.W = W;
+      this.H = H;
+      this.hud = hud2;
+      this.whole = H <= CANVAS_MAX_H && W * H <= CANVAS_MAX_AREA;
+      this.ops = [];
+      this.done = 0;
+      this.live = /* @__PURE__ */ new Set();
+      if (this.whole) {
+        this.cv = new OffscreenCanvas(W, H);
+        this.g = this.cv.getContext("2d");
+        this.g.imageSmoothingEnabled = false;
+        this.g.fillStyle = "#fff";
+        this.g.fillRect(0, 0, W, H);
+      } else {
+        this.png = new PngWriter(W, H);
+        this.band = Math.max(16, Math.min(512, Math.floor(16e6 / (W * 4))));
+        this.bc = new OffscreenCanvas(W, this.band);
+        this.bg = this.bc.getContext("2d", { willReadFrequently: true });
+        this.bg.imageSmoothingEnabled = false;
+      }
+      hud2.previewStart(W, H);
+    }
+    draw(img, sx, sy, sw, sh, dx, dy, dw = sw, dh = sh) {
+      if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+      this.hud.previewDraw(img, sx, sy, sw, sh, dx, dy, dw, dh);
+      if (this.whole) this.g.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+      else {
+        this.ops.push({ img, sx, sy, sw, sh, dx, dy, dw, dh });
+        this.live.add(img);
+      }
+    }
+    // Done with this piece (it's freed once nothing still needs it).
+    release(img) {
+      if (this.whole) img.close();
+      else img._free = true;
+    }
+    // Rows above upTo won't change any more: write them out (strip mode).
+    async flush(upTo) {
+      if (this.whole) return;
+      upTo = Math.min(this.H, Math.round(upTo));
+      while (this.done < upTo) {
+        const y0 = this.done;
+        const n = Math.min(this.band, upTo - y0);
+        const g = this.bg;
+        g.fillStyle = "#fff";
+        g.fillRect(0, 0, this.W, n);
+        for (const o of this.ops) if (o.dy < y0 + n && o.dy + o.dh > y0) g.drawImage(o.img, o.sx, o.sy, o.sw, o.sh, o.dx, o.dy - y0, o.dw, o.dh);
+        await this.png.addRows(g.getImageData(0, 0, this.W, n).data, n);
+        this.done += n;
+      }
+      this.ops = this.ops.filter((o) => o.dy + o.dh > this.done);
+      const still = new Set(this.ops.map((o) => o.img));
+      for (const img of this.live) {
+        if (!still.has(img) && img._free) {
+          img.close();
+          this.live.delete(img);
+        }
+      }
+    }
+    async finish() {
+      if (this.whole) {
+        const blob = await this.cv.convertToBlob({ type: "image/png" });
+        this.cv.width = 1;
+        this.cv.height = 1;
+        return blob;
+      }
+      await this.flush(this.H);
+      for (const img of this.live) img.close();
+      this.live.clear();
+      return this.png.finish();
+    }
+    abort() {
+      for (const img of this.live) {
+        try {
+          img.close();
+        } catch {
+        }
+      }
+      this.live.clear();
+      this.ops = [];
+    }
+  };
+  var Layout = class {
+    constructor(sc, view, H, maxTop, bmp, hud2) {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      this.bw = bmp.width;
+      this.bh = bmp.height;
+      const dpr = window.devicePixelRatio || 1;
+      const mx = bmp.width / vw;
+      const my = bmp.height / vh;
+      const kx = Math.abs(mx - dpr) < 0.03 ? dpr : mx;
+      const ky = Math.abs(my - dpr) < 0.03 ? dpr : my;
+      this.X = (v) => Math.round(v * kx);
+      this.Y = (v) => Math.round(v * ky);
+      this.view = view;
+      this.maxTop = maxTop;
+      this.doc = sc.kind === "doc";
+      if (this.doc) {
+        this.W = Math.min(bmp.width, this.X(view.w));
+        this.sliceH = Math.min(bmp.height, this.Y(view.h));
+        this.H = Math.max(this.sliceH, this.Y(H));
+      } else {
+        this.x0 = Math.max(0, this.X(view.x));
+        this.x1 = Math.min(bmp.width, this.X(view.x + view.w));
+        this.y0 = Math.max(0, this.Y(view.y));
+        this.y1 = Math.min(bmp.height, this.Y(view.y + view.h));
+        this.extra = Math.max(0, this.Y(H) - (this.y1 - this.y0));
+        const de = document.documentElement;
+        this.W = Math.min(bmp.width, this.X(de.clientWidth > 0 && de.clientWidth <= vw ? de.clientWidth : vw));
+        this.H = bmp.height + this.extra;
+      }
+      this.out = new Stitcher(this.W, this.H, hud2);
+    }
+    async add(bmp, t, first, last) {
+      const o = this.out;
+      const next = Math.min(t + this.view.h, this.maxTop);
+      if (this.doc) {
+        const dy2 = this.Y(t);
+        o.draw(bmp, 0, 0, this.W, Math.min(this.sliceH, this.H - dy2), 0, dy2);
+        o.release(bmp);
+        await o.flush(last ? this.H : this.Y(next));
+        return;
+      }
+      if (first) this.statics(bmp);
+      const dy = this.y0 + this.Y(t);
+      o.draw(bmp, this.x0, this.y0, this.x1 - this.x0, Math.min(this.y1 - this.y0, this.y1 + this.extra - dy), this.x0, dy);
+      o.release(bmp);
+      await o.flush(last ? this.H : this.y0 + this.Y(next));
+    }
+    // The parts of a web app around its scrolling panel come from the first piece: what's above
+    // it goes at the top, what's below it at the bottom, and side bars are stretched by repeating
+    // one plain row of pixels (picked where nothing is drawn, so buttons stay crisp).
+    statics(bmp) {
+      const o = this.out;
+      const { W, x0, x1, y0, y1, extra } = this;
+      o.draw(bmp, 0, 0, W, y0, 0, 0);
+      o.draw(bmp, 0, y1, W, this.bh - y1, 0, y1 + extra);
+      for (const [sx, sw] of [[0, x0], [x1, W - x1]]) {
+        if (sw <= 0 || y1 - y0 <= 0) continue;
+        const q = calmRow(bmp, sx, sw, y0, y1);
+        o.draw(bmp, sx, y0, sw, q - y0, sx, y0);
+        if (extra > 0) o.draw(bmp, sx, q, sw, 1, sx, q, sw, extra);
+        o.draw(bmp, sx, q, sw, y1 - q, sx, q + extra);
+      }
+    }
+  };
+  function calmRow(bmp, sx, sw, y0, y1) {
+    const h = y1 - y0;
+    if (h < 4) return y1 - 1;
+    let d;
+    try {
+      const c = new OffscreenCanvas(sw, h);
+      const g = c.getContext("2d", { willReadFrequently: true });
+      g.drawImage(bmp, sx, y0, sw, h, 0, 0, sw, h);
+      d = g.getImageData(0, 0, sw, h).data;
+    } catch {
+      return y1 - 1;
+    }
+    const n = sw * 4;
+    const same2 = (a, b) => {
+      const oa = a * n;
+      const ob = b * n;
+      for (let i = 0; i < n; i++) if (Math.abs(d[oa + i] - d[ob + i]) > 2) return false;
+      return true;
+    };
+    let best = null;
+    let start = 0;
+    for (let r = 1; r <= h; r++) {
+      if (r < h && same2(r - 1, r)) continue;
+      const len = r - start;
+      if (len >= 3 && (!best || len >= best.len)) best = { start, len };
+      start = r;
+    }
+    if (!best) return y1 - 1;
+    return y0 + best.start + Math.floor(best.len / 2);
+  }
+  async function snap(hud2) {
+    await waitSlot();
+    if (document.visibilityState !== "visible") throw new Error("the tab was switched during the screenshot");
+    hud2.snap(true);
+    await frames(2);
+    try {
+      return await grab();
     } finally {
-      unhide(hidden);
-      window.scrollTo({ left: ox, top: oy, behavior: "instant" });
-      if (prevBehavior[0]) html.style.setProperty("scroll-behavior", prevBehavior[0], prevBehavior[1]);
-      else html.style.removeProperty("scroll-behavior");
+      hud2.snap(false);
+    }
+  }
+  async function captureFull(hud2 = NOHUD) {
+    if (app.state.canvasMode) return captureVisible();
+    const sc = pickScroller();
+    if (!sc) return captureVisible();
+    stopFlag = false;
+    const check = () => {
+      if (stopFlag) throw new Stopped();
+    };
+    const keep = new Saver();
+    const de = document.documentElement;
+    const sx0 = window.scrollX;
+    const sy0 = window.scrollY;
+    const et0 = sc.kind === "el" ? sc.el.scrollTop : 0;
+    let hider = null;
+    let lay = null;
+    hud2.show();
+    hud2.phase("Getting the page ready…");
+    hud2.progress(0.02);
+    await prepare();
+    try {
+      keep.set(de, "scroll-behavior", "auto");
+      if (document.body) keep.set(document.body, "scroll-behavior", "auto");
+      if (sc.kind === "el") keep.set(sc.el, "scroll-behavior", "auto");
+      hideScrollbar(sc, keep);
+      if (document.fonts && document.fonts.ready) await Promise.race([document.fonts.ready, sleep(1200)]);
+      await loadPass(sc, hud2, check);
+      const pos = scanPositioned();
+      for (const el of pos.sticky) {
+        if (getRec(el)) continue;
+        keep.set(el, "position", "relative");
+        for (const p of ["top", "bottom", "left", "right"]) keep.set(el, p, "auto");
+      }
+      sc.to(0);
+      await frames(2);
+      await sleep(150);
+      hider = new Hider(classifyFixed(pos.fixed));
+      const view = sc.view();
+      const H = Math.min(sc.height(), MAX_CSS_H);
+      const maxTop = Math.max(0, H - view.h);
+      const plan = Math.min(MAX_SLICES, Math.ceil(maxTop / Math.max(1, view.h)) + 1);
+      let want = 0;
+      let prevT = -1;
+      for (let k = 0; ; k++) {
+        check();
+        if (k > 0) {
+          sc.to(want);
+          await frames(2);
+          await sleep(140);
+        }
+        const t = sc.top();
+        const last = t >= maxTop - 0.5 || k >= MAX_SLICES - 1 || k > 0 && t <= prevT + 0.5;
+        hider.show(k === 0 && last ? "all" : k === 0 ? "first" : last ? "last" : "none");
+        await waitImages(1500);
+        requestFull();
+        await frames(2);
+        hud2.phase(`Capturing ${k + 1} of ${Math.max(plan, k + 1)}`);
+        check();
+        const url = await snap(hud2);
+        const bmp = await createImageBitmap(dataUrlToBlob(url), { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+        if (!lay) lay = new Layout(sc, view, H, maxTop, bmp, hud2);
+        else if (bmp.width !== lay.bw || bmp.height !== lay.bh) {
+          bmp.close();
+          throw new Error("the window changed size during the screenshot — try again");
+        }
+        await lay.add(bmp, t, k === 0, last);
+        hud2.progress(0.24 + 0.66 * Math.min(1, (t + view.h) / Math.max(1, H)));
+        if (last) break;
+        prevT = t;
+        want = Math.min(maxTop, t + view.h);
+      }
+    } catch (err) {
+      if (lay) lay.out.abort();
+      throw err;
+    } finally {
+      if (sc.kind === "el") sc.el.scrollTo({ top: et0, left: sc.el.scrollLeft, behavior: "instant" });
+      window.scrollTo({ left: sx0, top: sy0, behavior: "instant" });
+      if (hider) hider.restore();
+      keep.restore();
       unprepare();
       requestFull();
     }
-    const bmps = await Promise.all(slices.map((s) => createImageBitmap(dataUrlToBlob(s.url))));
-    const scale = bmps[0].width / vw;
-    const outW = bmps[0].width;
-    const outH = Math.round(totalH * scale);
-    const k = Math.min(1, 32e3 / outH, Math.sqrt(25e7 / (outW * outH)));
-    const canvas = new OffscreenCanvas(Math.max(1, Math.round(outW * k)), Math.max(1, Math.round(outH * k)));
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    slices.forEach((s, i) => {
-      const b = bmps[i];
-      ctx.drawImage(b, 0, Math.round(s.y * scale * k), Math.round(b.width * k), Math.round(b.height * k));
-    });
-    bmps.forEach((b) => b.close && b.close());
-    return canvas.convertToBlob({ type: "image/png" });
+    hud2.phase("Stitching…");
+    hud2.progress(0.94);
+    const blob = await lay.out.finish();
+    blob._w = lay.W;
+    blob._h = lay.H;
+    hud2.progress(1);
+    return blob;
   }
   function copyImage(blobPromise) {
     const item = new ClipboardItem({ "image/png": blobPromise });
@@ -3273,8 +4218,11 @@
     if (st.canvasMode) return "Drag to draw boxes · Shift-drag or double-click-drag to select · Esc leaves the canvas";
     if (st.mode === "draw") return "Drag to draw a box · drag a box to move it · grab the arrows on its edges to resize · Esc to stop";
     if (st.mode === "change")
-      return "Click to pick anything · drag to move · grab the edge arrows to resize · W A S D resize · Delete hides it";
+      return `Click to pick anything · ${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks everything like it · drag to move · W A S D resize`;
     return "Hover anything to see its size and spacing · U switches units · H hides guides · Esc closes";
+  }
+  function modKey() {
+    return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "") ? "Ctrl/⌘" : "Ctrl";
   }
   function showHint(text, ms = 6500) {
     if (!R.hint) return;
@@ -3311,37 +4259,110 @@
       return "Screenshot blocked — click the extension icon on this tab again, then retry";
     return "Screenshot failed" + (m ? ": " + m.slice(0, 90) : "");
   }
+  function cameraFlash() {
+    if (!app.root) return;
+    const f = mk("div", "flash", app.root);
+    app.lastFlash = performance.now();
+    f.addEventListener("animationend", () => f.remove());
+    setTimeout(() => f.remove(), 2e3);
+  }
+  var hud = {
+    t: null,
+    k: 1,
+    show() {
+      clearTimeout(hud.t);
+      R.hudFill.style.width = "0%";
+      R.hud.classList.remove("snap");
+      R.hud.classList.add("on");
+    },
+    hide(ms = 0) {
+      clearTimeout(hud.t);
+      hud.t = setTimeout(() => R.hud.classList.remove("on"), ms);
+    },
+    phase(text) {
+      R.hudSub.textContent = text;
+    },
+    progress(p) {
+      R.hudFill.style.width = (clamp(p, 0, 1) * 100).toFixed(1) + "%";
+    },
+    snap(on) {
+      R.hud.classList.toggle("snap", on);
+    },
+    previewStart(W, H) {
+      const c = R.hudPrev;
+      const dpr = window.devicePixelRatio || 1;
+      const cw = 52;
+      const ch = Math.round(clamp(cw * H / W, 24, 132));
+      c.style.width = cw + "px";
+      c.style.height = ch + "px";
+      c.width = Math.round(cw * dpr);
+      c.height = Math.round(ch * dpr);
+      hud.k = Math.min(c.width / W, c.height / H);
+      hud.ox = (c.width - W * hud.k) / 2;
+      const g = c.getContext("2d");
+      g.fillStyle = "#f3f4f6";
+      g.fillRect(0, 0, c.width, c.height);
+      c.classList.add("on");
+    },
+    previewDraw(img, sx, sy, sw, sh, dx, dy, dw, dh) {
+      const g = R.hudPrev.getContext("2d");
+      const k = hud.k;
+      try {
+        g.drawImage(img, sx, sy, sw, sh, hud.ox + dx * k, dy * k, dw * k, Math.max(1, dh * k));
+      } catch {
+      }
+    }
+  };
   function shot(kind, how, w) {
     if (busy) return;
     busy = true;
     hideTip();
     closeEditor(true);
-    const make = kind === "full" ? captureFull : captureVisible;
-    const label = kind === "full" ? "Full page" : "Screenshot";
-    const done = (ok, msg) => {
+    const full = kind === "full";
+    const make = full ? () => captureFull(hud) : captureVisible;
+    const label = full ? "Full page" : "Screenshot";
+    const done = (ok, msg, blob) => {
       busy = false;
+      if (full) hud.hide(ok ? 120 : 0);
+      if (ok) cameraFlash();
       flash(w, ok, ok ? 1600 : 2400);
-      if (msg) toast(msg, ok ? 2200 : 3600);
+      if (msg) toast(msg, ok ? 2400 : 3600);
     };
-    const name = fileName(kind === "full" ? "full-page" : "screen");
-    const saveInstead = (p) => p.then(
+    const fail = (err) => {
+      if (err && err.stopped) {
+        busy = false;
+        if (full) hud.hide();
+        toast("Screenshot stopped", 1600);
+        return;
+      }
+      done(false, captureError(err));
+    };
+    const size = (blob) => blob && blob._w ? ` (${blob._w} × ${blob._h})` : "";
+    const name = fileName(full ? "full-page" : "screen");
+    const saveInstead = (p, why) => p.then(
       (blob) => {
         downloadBlob(blob, name);
-        done(true, `This page doesn't allow copying, so the ${label.toLowerCase()} was downloaded instead`);
+        const what = label.toLowerCase();
+        const m = String(why && why.message || "");
+        let msg;
+        if (!window.isSecureContext) msg = `This page doesn't allow copying, so the ${what} was downloaded instead`;
+        else if (/focus/i.test(m)) msg = `Copying needs this tab to stay in front, so the ${what} was downloaded instead`;
+        else msg = `Couldn't copy that picture (it may be too big for the clipboard), so the ${what} was downloaded instead`;
+        done(true, msg);
       },
-      (e2) => done(false, captureError(e2))
+      fail
     );
     if (how === "copy") {
       let p;
       try {
         p = make();
         copyImage(p).then(
-          () => done(true, `${label} copied — paste it anywhere`),
-          () => saveInstead(p)
+          () => p.then((blob) => done(true, `${label} copied${size(blob)} — paste it anywhere`)),
+          (why) => saveInstead(p, why)
         );
       } catch (err) {
         if (p) saveInstead(p);
-        else done(false, captureError(err));
+        else fail(err);
       }
     } else {
       make().then(
@@ -3349,7 +4370,7 @@
           downloadBlob(blob, name);
           done(true, `${label} downloaded`);
         },
-        (err) => done(false, captureError(err))
+        fail
       );
     }
   }
@@ -3751,11 +4772,18 @@
     updateFlexPanel();
     if (st.mode === "change" && !st.canvasMode && app.sel.length === 1 && !selHintShown) {
       selHintShown = true;
-      showHint("Click it again to pick the box around it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider", 7e3);
+      showHint(`${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7e3);
     }
     app.uiRectDirty = true;
   }
   var uiFrame = 0;
+  function fitBars() {
+    const natural = Math.max(R.white.scrollWidth, R.purple.scrollWidth);
+    const room = app.vw - 24;
+    const k = natural > room ? clamp(room / natural, 0.55, 1) : 1;
+    const v = k < 1 ? `scale(${k.toFixed(3)})` : "";
+    if (R.bars.style.transform !== v) R.bars.style.transform = v;
+  }
   function frameUI() {
     if (!R.afloat) return;
     const st = app.state;
@@ -3772,6 +4800,7 @@
     }
     if (R.afloat.classList.contains("open") !== show) R.afloat.classList.toggle("open", show);
     if (app.uiRectDirty || uiFrame++ % 40 === 0) {
+      fitBars();
       const r = R.bars.getBoundingClientRect();
       app.uiRect = { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 };
       app.uiRectDirty = false;
@@ -3876,6 +4905,14 @@
     R.afloat = mk("div", "afloat ui", root);
     fillAlign(R.afloat);
     buildFlexPanel();
+    R.hud = mk("div", "hud", root);
+    R.hudPrev = mk("canvas", "hud-prev", R.hud);
+    const ht = mk("div", "hud-txt", R.hud);
+    mk("div", "hud-title", ht, "Full-page screenshot");
+    R.hudSub = mk("div", "hud-sub", ht, "");
+    const hb = mk("div", "hud-bar", ht);
+    R.hudFill = mk("i", "", hb);
+    mk("div", "hud-esc", ht, "Esc stops");
     R.tip = mk("div", "tip", root);
     R.hint = mk("div", "hint", root);
     R.toast = mk("div", "toast", root);
@@ -3901,7 +4938,8 @@
       cycleUnit,
       toggleGuides,
       group: () => runTool(R.group, group),
-      ungroup: () => runTool(R.group, ungroup)
+      ungroup: () => runTool(R.group, ungroup),
+      cancelCapture: stopCapture
     });
   }
   function guidesButton(parent) {
@@ -4014,7 +5052,6 @@
 
   // src/content/interact.js
   var lastUp = { t: 0, x: -99, y: -99 };
-  var lastClick = { t: 0, x: -99, y: -99 };
   var cursor = "";
   function interactive() {
     const st = app.state;
@@ -4028,11 +5065,6 @@
       if (n.classList && n.classList.contains("ui")) return true;
     }
     return false;
-  }
-  function parentOf(el) {
-    if (el.parentElement) return el.parentElement;
-    const root = el.getRootNode ? el.getRootNode() : null;
-    return root && root.host ? root.host : null;
   }
   function pickElement(x, y) {
     let list;
@@ -4061,16 +5093,6 @@
     while (e && !isRootish(e)) {
       if (app.candByEl.has(e)) return e;
       e = parentOf(e);
-    }
-    return null;
-  }
-  function parentPick(el) {
-    const r = rectOf(el);
-    let p = parentOf(el);
-    while (p && !isRootish(p)) {
-      const pr = rectOf(p);
-      if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
-      p = parentOf(p);
     }
     return null;
   }
@@ -4124,7 +5146,7 @@
       }
       if (best) break;
     }
-    if (best) return { type: "edge", it: best.it, edge: best.edge, x: best.x, y: best.y };
+    if (best) return { type: "edge", it: best.it, edge: best.edge, x: best.x, y: best.y, f: best.f, exact: !!best.exact };
     for (const c of app.chips) if (containsPt(c, x, y, 1)) return { type: "chip", chip: c };
     return null;
   }
@@ -4163,13 +5185,33 @@
     setCursor(cursorFor(hot, item));
     requestRender();
   }
+  function sameHot(a, b) {
+    if (!a || !b) return a === b;
+    if (a.type !== b.type) return false;
+    if (a.type === "edge") return a.edge === b.edge && same(a.it, b.it);
+    if (a.type === "corner") return a.corner === b.corner;
+    if (a.type === "spacing") return a.i === b.i;
+    if (a.type === "chip") return a.chip.x === b.chip.x && a.chip.y === b.chip.y;
+    return true;
+  }
+  function refreshHot() {
+    if (app.drag || !app.mouse.inside || !app.state.open || app.state.capturing) return;
+    if (!sameHot(findHot(app.mouse.x, app.mouse.y), app.hot)) updateHover(app.mouse.x, app.mouse.y);
+  }
   function setMouse(x, y, inside) {
     app.mouse.x = x;
     app.mouse.y = y;
     app.mouse.inside = inside;
   }
+  function setMods(e) {
+    const mod = !!(e.metaKey || e.ctrlKey);
+    const shift = !!e.shiftKey;
+    if (app.mods.mod === mod && app.mods.shift === shift) return;
+    app.mods = { mod, shift };
+    requestRender();
+  }
   function onDown(e) {
-    if (e.button !== 0 || !interactive() || app.state.closing) return;
+    if (e.button !== 0 || !interactive() || app.state.closing || app.state.capturing) return;
     e.preventDefault();
     hub.closeEditor(true);
     try {
@@ -4204,6 +5246,7 @@
     if (!app.state.open) return;
     const x = e.clientX;
     const y = e.clientY;
+    setMods(e);
     const d = app.drag;
     if (d) {
       if (e.pointerId !== d.pointerId) return;
@@ -4431,6 +5474,8 @@
     begin("Resize");
     d.type = "edge";
     d.edge = hot.edge;
+    d.f = hot.f;
+    d.exact = !!hot.exact;
     d.main = it;
     d.items = group2.map(startState);
     d.mainState = d.items.find((s) => same(s.it, it)) || d.items[0];
@@ -4578,8 +5623,6 @@
   }
   function click(d) {
     const hot = d.hot;
-    const near = Math.hypot(d.sx - lastClick.x, d.sy - lastClick.y) < 5 && performance.now() - lastClick.t < 4e3;
-    lastClick = { t: performance.now(), x: d.sx, y: d.sy };
     if (hot && hot.type === "chip") return hub.openEditor(hot.chip);
     if (hot && hot.type === "edge") {
       const chip2 = app.chips.find((c) => containsPt(c, d.sx, d.sy, 1));
@@ -4601,23 +5644,45 @@
       setSelection([shapeItem(s)]);
       return;
     }
+    if (d.mod && it.kind === "el") return modClick(it, d.shift);
     if (d.shift) return toggleSelected(it);
-    const cur2 = app.sel.length === 1 ? app.sel[0] : null;
-    if (it.kind === "el" && cur2 && cur2.kind === "el" && deepContains(cur2.el, it.el) && (cur2.el === it.el || near)) {
-      const p = parentPick(cur2.el);
-      if (p) {
-        setSelection([elItem(p)]);
-        hub.toast(`Picked the box around it: ${describe(p)}`, 1400);
-      }
+    setSelection([it]);
+  }
+  function modClick(it, shift) {
+    if (shift) {
+      const base = alikeBase(it.el);
+      const list = alikeOf(base);
+      setSelection(list.map(elItem));
+      hub.toast(
+        list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
+        2600
+      );
       return;
     }
-    setSelection([it]);
+    const sel = liveSel().filter((s) => s.kind === "el");
+    const inside = sel.filter((s) => deepContains(s.el, it.el));
+    if (!inside.length) {
+      setSelection([it]);
+      return;
+    }
+    const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el) || s.el);
+    const uniq = [];
+    for (const el of up) if (!uniq.includes(el)) uniq.push(el);
+    const outer = uniq.filter((el) => !uniq.some((o) => o !== el && deepContains(o, el)));
+    const moved = outer.some((el) => !sel.some((s) => s.el === el));
+    if (!moved) {
+      hub.toast("That's already the biggest box", 1400);
+      return;
+    }
+    setSelection(outer.map(elItem));
+    hub.toast(outer.length === 1 ? `Picked the box around it: ${describe(outer[0])}` : `Picked the boxes around them (${outer.length})`, 1600);
   }
   function onContext(e) {
     if (!interactive()) return;
-    const s = shapeAt(e.clientX, e.clientY, 2);
     e.preventDefault();
     e.stopPropagation();
+    if (e.ctrlKey && e.button === 0) return;
+    const s = shapeAt(e.clientX, e.clientY, 2);
     if (!s) return;
     begin("Remove box");
     touchShapes();
@@ -4685,10 +5750,10 @@
     begin("Resize");
     for (const s of items.map(startState)) {
       const r = { ...s.rect };
-      const f = (v, grow) => {
-        if (fine) return Math.max(1, Math.round(v) + (grow ? 1 : -1));
-        let n = Math.round(grow ? v * 1.05 : v / 1.05);
-        if (n === Math.round(v)) n += grow ? 1 : -1;
+      const f = (v, grow2) => {
+        if (fine) return Math.max(1, Math.round(v) + (grow2 ? 1 : -1));
+        let n = Math.round(grow2 ? v * 1.05 : v / 1.05);
+        if (n === Math.round(v)) n += grow2 ? 1 : -1;
         return Math.max(1, n);
       };
       if (key === "d") r.w = f(r.w, true);
@@ -4753,11 +5818,21 @@
     const editing2 = interactive();
     const hasSel = editing2 && app.sel.length > 0;
     const d = app.drag;
+    setMods(e);
     if (d && (k === "Shift" || k === "Meta" || k === "Control" || k === "Alt")) {
       d.shift = e.shiftKey;
       d.mod = e.metaKey || e.ctrlKey;
       if (d.type !== "pending") dragMove(d);
       requestRender();
+      return;
+    }
+    if (st.capturing) {
+      if (k === "Escape") {
+        hub.cancelCapture();
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+      }
       return;
     }
     let handled = false;
@@ -4803,6 +5878,7 @@
     }
   }
   function onKeyUp(e) {
+    setMods(e);
     const d = app.drag;
     if (!d) return;
     d.shift = e.shiftKey;
@@ -4819,6 +5895,7 @@
     }
   }
   function onBlur() {
+    app.mods = { mod: false, shift: false };
     if (app.drag && app.drag.type !== "pending") {
       const d = app.drag;
       app.drag = null;
@@ -4844,6 +5921,7 @@
     window.addEventListener("mouseout", onOut, true);
     window.addEventListener("blur", onBlur);
     hub.cancelDrag = cancelDrag;
+    hub.refreshHot = refreshHot;
   }
   function detachInteract() {
     cancelDrag();
@@ -4907,6 +5985,7 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .bars {
   position: absolute; top: 12px; right: 12px; z-index: 4;
   display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+  transform-origin: top right;
 }
 .bar { display: flex; align-items: center; gap: 8px; }
 .btn {
@@ -5072,14 +6151,36 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
   visibility: hidden !important; transition: none !important;
 }
 
-@media (max-width: 640px) {
-  .bars { transform: scale(.8); transform-origin: top right; }
+/* full-page screenshot progress card (it hides for the instant each piece is taken) */
+.hud {
+  position: absolute; top: 14px; left: 50%; z-index: 8;
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 16px 11px 10px;
+  background: #fff; border-radius: 14px; color: #111; pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.08), 0 12px 32px rgba(0,0,0,.16);
+  opacity: 0; transform: translate(-50%, -10px) scale(.96);
+  transition: opacity .2s, transform .3s cubic-bezier(.2,1.25,.3,1);
 }
+.hud.on { opacity: 1; transform: translate(-50%, 0); }
+.hud.snap { visibility: hidden !important; transition: none !important; }
+.hud-prev { display: block; flex: none; border-radius: 4px; background: #f3f4f6; box-shadow: 0 0 0 1px rgba(0,0,0,.08); }
+.hud-txt { display: flex; flex-direction: column; gap: 3px; min-width: 160px; padding-top: 1px; }
+.hud-title { font-size: 12px; font-weight: 700; letter-spacing: -.1px; }
+.hud-sub { font-size: 11px; color: #6b7280; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hud-bar { position: relative; height: 4px; border-radius: 2px; background: #e5e7eb; overflow: hidden; margin-top: 5px; }
+.hud-bar > i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2563eb; border-radius: 2px; transition: width .25s ease; }
+.pd[data-mode="change"] .hud-bar > i { background: #7c3aed; }
+.hud-esc { font-size: 10px; color: #9ca3af; margin-top: 3px; }
+
+/* camera flash after a screenshot: white for a moment, then it fades away */
+.flash { position: absolute; inset: 0; z-index: 30; background: #fff; pointer-events: none; animation: pdflash .72s cubic-bezier(.3,0,.2,1) forwards; }
+@keyframes pdflash { 0% { opacity: 1; } 28% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes pdflashsoft { 0% { opacity: .4; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .flash { animation: pdflashsoft .4s ease-out forwards; } }
 `;
 
   // src/content/index.js
-  var VERSION = "0.1.0";
-  var BUILD = true ? "60b8ca9743d0" : VERSION;
+  var VERSION = "0.2.0";
+  var BUILD = true ? "d622bdeec66b" : VERSION;
   var mo = null;
   var timers = [];
   var closeTimer = 0;
@@ -5249,11 +6350,13 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
     if (!wasClosing) {
       app.openedAt = performance.now();
       app.revealed = /* @__PURE__ */ new WeakMap();
+      app.reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
       resizeCanvas();
+      startWave();
       collect();
       attachListeners();
     }
-    keepAnimating(1900);
+    keepAnimating(2100);
     attachInteract();
     showBars();
     sync();

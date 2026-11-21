@@ -30,4 +30,5 @@ next-env.d.ts
 /extension/node_modules
 /extension/build-test
 /extension/test-output
+/extension/dist
 .DS_Store

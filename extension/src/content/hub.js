@@ -16,4 +16,6 @@ export const hub = {
   group: noop,
   ungroup: noop,
   cancelDrag: noop,
+  cancelCapture: noop,
+  refreshHot: noop,
 };

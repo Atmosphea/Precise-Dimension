@@ -1,5 +1,5 @@
 // Finds every visible element on the page and keeps their boxes up to date.
-import { app } from './app.js';
+import { app, WAVE } from './app.js';
 import { clamp, cssPx, isOurs, deepContains } from './util.js';
 
 const SKIP = new Set([
@@ -261,19 +261,21 @@ export function collect() {
     for (const c of out) if (c.occ && behind.has(c.occ)) c.occ = null;
   }
 
-  // Reveal cascade: new elements appear one by one, outer boxes first, top to bottom.
+  // How new boxes appear: while the opening wave is still spreading they're drawn in by it;
+  // after that, boxes that show up later (scrolling, new content) fade in one by one.
   const now = performance.now();
   const fresh = out.filter((c) => !app.revealed.has(c.el));
-  if (fresh.length && app.state.capturing) {
+  if (fresh.length && (app.state.capturing || app.reduceMotion)) {
     for (const c of fresh) app.revealed.set(c.el, now - 5000); // no animation inside screenshots
+  } else if (fresh.length && app.wave && now < app.wave.grow) {
+    for (const c of fresh) app.revealed.set(c.el, WAVE);
   } else if (fresh.length) {
-    const firstOpen = now - app.openedAt < 200;
     const order = fresh.slice().sort((a, b) => a.depth - b.depth || a.dy - b.dy || a.dx - b.dx);
-    const total = firstOpen ? 1000 : 260;
-    const step = clamp(total / order.length, firstOpen ? 1.1 : 0.5, firstOpen ? 26 : 12);
+    const total = 260;
+    const step = clamp(total / order.length, 0.5, 12);
     order.forEach((c, i) => app.revealed.set(c.el, now + Math.min(i * step, total)));
   }
-  for (const c of out) c.at = app.revealed.get(c.el) || now;
+  for (const c of out) c.at = app.revealed.get(c.el) ?? now;
 
   // Draw outer boxes first so nested ones stack on top.
   out.sort((a, b) => a.depth - b.depth);

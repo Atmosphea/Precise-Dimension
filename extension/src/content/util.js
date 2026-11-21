@@ -96,6 +96,25 @@ export function isRootish(el) {
   return el === document.documentElement || el === document.body;
 }
 
+// The element's parent, stepping out of web components (shadow DOM) too.
+export function parentOf(el) {
+  if (el.parentElement) return el.parentElement;
+  const root = el.getRootNode ? el.getRootNode() : null;
+  return root && root.host ? root.host : null;
+}
+
+// The nearest box around an element that actually looks different (skips same-size wrappers).
+export function parentPick(el) {
+  const r = rectOf(el);
+  let p = parentOf(el);
+  while (p && !isRootish(p)) {
+    const pr = rectOf(p);
+    if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
+    p = parentOf(p);
+  }
+  return null;
+}
+
 // True when the page itself has keyboard focus in a text field (so we leave its keys alone).
 export function pageIsTyping() {
   let a = document.activeElement;
@@ -187,7 +206,7 @@ export function describe(el) {
 const UTIL_RE =
   /^-?(m|mx|my|mt|mr|mb|ml|ms|me|p|px|py|pt|pr|pb|pl|ps|pe|w|h|min|max|size|gap|space|text|bg|from|via|to|flex|grid|col|row|items|justify|content|self|place|order|rounded|border|divide|ring|outline|shadow|font|leading|tracking|line|decoration|underline|overflow|z|top|left|right|bottom|inset|translate|scale|rotate|skew|origin|transition|duration|ease|delay|animate|opacity|blur|backdrop|fill|stroke|object|aspect|basis|grow|shrink|cursor|select|pointer|sr|whitespace|break|truncate|list|appearance|columns|float|clear|isolation|mix|filter|drop|invert|sepia|saturate|hue|contrast|brightness|grayscale|accent|caret|scroll|snap|touch|will|tabular|antialiased|uppercase|lowercase|capitalize|italic|not|visible|invisible|collapse|static|fixed|absolute|relative|sticky|block|inline|hidden|contents|table|container|prose|dark|sm|md|lg|xl|2xl|group|peer)(-|$)/;
 
-function nameClasses(el) {
+export function nameClasses(el) {
   return [...el.classList].filter(
     (c) => /^[A-Za-z_][\w-]*$/.test(c) && c.length <= 32 && !UTIL_RE.test(c) && !/\d{3,}/.test(c),
   );

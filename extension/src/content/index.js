@@ -3,7 +3,7 @@
 import { app, HOST_TAG, requestRender, requestFull, requestCollect, keepAnimating } from './app.js';
 import { hub } from './hub.js';
 import { collect, measure } from './collect.js';
-import { draw, resizeCanvas } from './render.js';
+import { draw, resizeCanvas, startWave } from './render.js';
 import { buildUI, showBars, hideBars, sync, frameUI, showHint } from './ui.js';
 import { setupLayer, attachInteract, detachInteract } from './interact.js';
 import { setSelection } from './items.js';
@@ -11,7 +11,7 @@ import { getRec } from './edits.js';
 import { loadPrefs } from './prefs.js';
 import { CSS } from './styles.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 // eslint-disable-next-line no-undef
 const BUILD = typeof __PD_BUILD__ === 'string' ? __PD_BUILD__ : VERSION; // set by build.mjs
 let mo = null;
@@ -198,11 +198,13 @@ function open() {
   if (!wasClosing) {
     app.openedAt = performance.now();
     app.revealed = new WeakMap();
+    app.reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
     resizeCanvas();
+    startWave(); // the opening pulse out of the toolbar icon
     collect();
     attachListeners();
   }
-  keepAnimating(1900);
+  keepAnimating(2100);
   attachInteract();
   showBars();
   sync();

@@ -9,7 +9,7 @@ import { setSelection, onSelection, startState, applyRect, itemRect, itemCtx, sa
 import { begin, commit, undo, canUndo, onHistory } from './history.js';
 import { group, ungroup, align, distribute, pulseReflow, magicFix, resetAll, flexInfo, setFlexProp } from './tools.js';
 import { buildEditsText } from './exporttext.js';
-import { captureVisible, captureFull, copyImage, copyText, downloadBlob, fileName } from './capture.js';
+import { captureVisible, captureFull, stopCapture, copyImage, copyText, downloadBlob, fileName } from './capture.js';
 import { savePrefs } from './prefs.js';
 
 const R = {};
@@ -149,8 +149,12 @@ function hintFor() {
   if (st.canvasMode) return 'Drag to draw boxes · Shift-drag or double-click-drag to select · Esc leaves the canvas';
   if (st.mode === 'draw') return 'Drag to draw a box · drag a box to move it · grab the arrows on its edges to resize · Esc to stop';
   if (st.mode === 'change')
-    return 'Click to pick anything · drag to move · grab the edge arrows to resize · W A S D resize · Delete hides it';
+    return `Click to pick anything · ${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks everything like it · drag to move · W A S D resize`;
   return 'Hover anything to see its size and spacing · U switches units · H hides guides · Esc closes';
+}
+
+function modKey() {
+  return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '') ? 'Ctrl/⌘' : 'Ctrl';
 }
 
 export function showHint(text, ms = 6500) {
@@ -195,39 +199,116 @@ function captureError(err) {
   return 'Screenshot failed' + (m ? ': ' + m.slice(0, 90) : '');
 }
 
+// A camera flash: the whole screen goes white for a moment, then fades away.
+export function cameraFlash() {
+  if (!app.root) return;
+  const f = mk('div', 'flash', app.root);
+  app.lastFlash = performance.now();
+  f.addEventListener('animationend', () => f.remove());
+  setTimeout(() => f.remove(), 2000);
+}
+
+// The little card that shows a full-page screenshot being taken, with a live preview of the
+// picture as the pieces are joined. It hides for the instant each piece is taken.
+const hud = {
+  t: null,
+  k: 1,
+  show() {
+    clearTimeout(hud.t);
+    R.hudFill.style.width = '0%';
+    R.hud.classList.remove('snap');
+    R.hud.classList.add('on');
+  },
+  hide(ms = 0) {
+    clearTimeout(hud.t);
+    hud.t = setTimeout(() => R.hud.classList.remove('on'), ms);
+  },
+  phase(text) {
+    R.hudSub.textContent = text;
+  },
+  progress(p) {
+    R.hudFill.style.width = (clamp(p, 0, 1) * 100).toFixed(1) + '%';
+  },
+  snap(on) {
+    R.hud.classList.toggle('snap', on);
+  },
+  previewStart(W, H) {
+    const c = R.hudPrev;
+    const dpr = window.devicePixelRatio || 1;
+    const cw = 52;
+    const ch = Math.round(clamp((cw * H) / W, 24, 132));
+    c.style.width = cw + 'px';
+    c.style.height = ch + 'px';
+    c.width = Math.round(cw * dpr);
+    c.height = Math.round(ch * dpr);
+    hud.k = Math.min(c.width / W, c.height / H);
+    hud.ox = (c.width - W * hud.k) / 2;
+    const g = c.getContext('2d');
+    g.fillStyle = '#f3f4f6';
+    g.fillRect(0, 0, c.width, c.height);
+    c.classList.add('on');
+  },
+  previewDraw(img, sx, sy, sw, sh, dx, dy, dw, dh) {
+    const g = R.hudPrev.getContext('2d');
+    const k = hud.k;
+    try {
+      g.drawImage(img, sx, sy, sw, sh, hud.ox + dx * k, dy * k, dw * k, Math.max(1, dh * k));
+    } catch {}
+  },
+};
+
 function shot(kind, how, w) {
   if (busy) return;
   busy = true;
   hideTip();
   closeEditor(true);
-  const make = kind === 'full' ? captureFull : captureVisible;
-  const label = kind === 'full' ? 'Full page' : 'Screenshot';
-  const done = (ok, msg) => {
+  const full = kind === 'full';
+  const make = full ? () => captureFull(hud) : captureVisible;
+  const label = full ? 'Full page' : 'Screenshot';
+  const done = (ok, msg, blob) => {
     busy = false;
+    if (full) hud.hide(ok ? 120 : 0);
+    if (ok) cameraFlash();
     flash(w, ok, ok ? 1600 : 2400);
-    if (msg) toast(msg, ok ? 2200 : 3600);
+    if (msg) toast(msg, ok ? 2400 : 3600);
   };
-  const name = fileName(kind === 'full' ? 'full-page' : 'screen');
+  const fail = (err) => {
+    if (err && err.stopped) {
+      busy = false;
+      if (full) hud.hide();
+      toast('Screenshot stopped', 1600);
+      return;
+    }
+    done(false, captureError(err));
+  };
+  const size = (blob) => (blob && blob._w ? ` (${blob._w} × ${blob._h})` : '');
+  const name = fileName(full ? 'full-page' : 'screen');
   // If this page doesn't allow copying (plain http:// sites, for example), save the file instead.
-  const saveInstead = (p) =>
+  const saveInstead = (p, why) =>
     p.then(
       (blob) => {
         downloadBlob(blob, name);
-        done(true, `This page doesn't allow copying, so the ${label.toLowerCase()} was downloaded instead`);
+        const what = label.toLowerCase();
+        const m = String((why && why.message) || '');
+        let msg;
+        if (!window.isSecureContext) msg = `This page doesn't allow copying, so the ${what} was downloaded instead`;
+        else if (/focus/i.test(m)) msg = `Copying needs this tab to stay in front, so the ${what} was downloaded instead`;
+        else msg = `Couldn't copy that picture (it may be too big for the clipboard), so the ${what} was downloaded instead`;
+        done(true, msg);
       },
-      (e2) => done(false, captureError(e2)),
+      fail,
     );
   if (how === 'copy') {
     let p;
     try {
       p = make();
       copyImage(p).then(
-        () => done(true, `${label} copied — paste it anywhere`),
-        () => saveInstead(p),
+        () => p.then((blob) => done(true, `${label} copied${size(blob)} — paste it anywhere`)),
+        (why) => saveInstead(p, why),
       );
     } catch (err) {
       if (p) saveInstead(p);
-      else done(false, captureError(err));
+      else fail(err);
     }
   } else {
     make().then(
@@ -235,7 +316,7 @@ function shot(kind, how, w) {
         downloadBlob(blob, name);
         done(true, `${label} downloaded`);
       },
-      (err) => done(false, captureError(err)),
+      fail,
     );
   }
 }
@@ -673,12 +754,21 @@ export function sync() {
   updateFlexPanel();
   if (st.mode === 'change' && !st.canvasMode && app.sel.length === 1 && !selHintShown) {
     selHintShown = true;
-    showHint('Click it again to pick the box around it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider', 7000);
+    showHint(`${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7000);
   }
   app.uiRectDirty = true;
 }
 
 let uiFrame = 0;
+
+// Narrow windows (phones, split screens): shrink the toolbars so every button still fits.
+function fitBars() {
+  const natural = Math.max(R.white.scrollWidth, R.purple.scrollWidth);
+  const room = app.vw - 24;
+  const k = natural > room ? clamp(room / natural, 0.55, 1) : 1;
+  const v = k < 1 ? `scale(${k.toFixed(3)})` : '';
+  if (R.bars.style.transform !== v) R.bars.style.transform = v;
+}
 
 // Called every drawn frame.
 export function frameUI() {
@@ -697,6 +787,7 @@ export function frameUI() {
   }
   if (R.afloat.classList.contains('open') !== show) R.afloat.classList.toggle('open', show);
   if (app.uiRectDirty || uiFrame++ % 40 === 0) {
+    fitBars();
     const r = R.bars.getBoundingClientRect();
     app.uiRect = { x: r.left - 4, y: r.top - 4, w: r.width + 8, h: r.height + 8 };
     app.uiRectDirty = false;
@@ -813,6 +904,14 @@ export function buildUI() {
   R.afloat = mk('div', 'afloat ui', root);
   fillAlign(R.afloat);
   buildFlexPanel();
+  R.hud = mk('div', 'hud', root);
+  R.hudPrev = mk('canvas', 'hud-prev', R.hud);
+  const ht = mk('div', 'hud-txt', R.hud);
+  mk('div', 'hud-title', ht, 'Full-page screenshot');
+  R.hudSub = mk('div', 'hud-sub', ht, '');
+  const hb = mk('div', 'hud-bar', ht);
+  R.hudFill = mk('i', '', hb);
+  mk('div', 'hud-esc', ht, 'Esc stops');
   R.tip = mk('div', 'tip', root);
   R.hint = mk('div', 'hint', root);
   R.toast = mk('div', 'toast', root);
@@ -841,6 +940,7 @@ export function buildUI() {
     toggleGuides,
     group: () => runTool(R.group, group),
     ungroup: () => runTool(R.group, ungroup),
+    cancelCapture: stopCapture,
   });
 }
 

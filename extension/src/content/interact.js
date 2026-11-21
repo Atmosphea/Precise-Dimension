@@ -2,17 +2,17 @@
 // resizing, spacing, marquee selection, nudging and shortcuts.
 import { app, requestRender, requestFull, requestCollect } from './app.js';
 import { hub } from './hub.js';
-import { rectOf, normRect, union, containsPt, containsRect, overlaps, isRootish, isOurs, pageIsTyping, sameRect, describe, deepContains } from './util.js';
+import { normRect, union, containsPt, containsRect, overlaps, isRootish, isOurs, pageIsTyping, describe, deepContains, parentOf, parentPick } from './util.js';
 import { createShape, removeShape, shapeAt, shapeRect, activeShapes, duplicateShape } from './shapes.js';
 import { elItem, shapeItem, same, itemRect, isSelected, setSelection, toggleSelected, startState, applyRect, itemCtx } from './items.js';
 import { begin, commit, cancel, undo, redo, canUndo, canRedo, touch, touchShapes } from './history.js';
 import { buildTargets, snapMove, snapEdges, SNAP } from './snap.js';
 import { snapToUnit, unitStep } from './units.js';
 import { setDeleted } from './edits.js';
-import { computeSpacing } from './render.js';
+import { computeSpacing, alikeBase } from './render.js';
+import { alikeOf, alikeLabel } from './alike.js';
 
 let lastUp = { t: 0, x: -99, y: -99 };
-let lastClick = { t: 0, x: -99, y: -99 };
 let cursor = '';
 
 export function interactive() {
@@ -28,12 +28,6 @@ function overUI(e) {
     if (n.classList && n.classList.contains('ui')) return true;
   }
   return false;
-}
-
-function parentOf(el) {
-  if (el.parentElement) return el.parentElement;
-  const root = el.getRootNode ? el.getRootNode() : null;
-  return root && root.host ? root.host : null;
 }
 
 // The page element under a point (skipping our own overlay), climbed to something we measured.
@@ -67,17 +61,7 @@ export function pickElement(x, y) {
   return null;
 }
 
-// The nearest box around an element that actually looks different (skips same-size wrappers).
-export function parentPick(el) {
-  const r = rectOf(el);
-  let p = parentOf(el);
-  while (p && !isRootish(p)) {
-    const pr = rectOf(p);
-    if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
-    p = parentOf(p);
-  }
-  return null;
-}
+export { parentPick };
 
 function itemAt(x, y) {
   const s = shapeAt(x, y, 2);
@@ -133,7 +117,7 @@ function findHot(x, y) {
     }
     if (best) break;
   }
-  if (best) return { type: 'edge', it: best.it, edge: best.edge, x: best.x, y: best.y };
+  if (best) return { type: 'edge', it: best.it, edge: best.edge, x: best.x, y: best.y, f: best.f, exact: !!best.exact };
   for (const c of app.chips) if (containsPt(c, x, y, 1)) return { type: 'chip', chip: c };
   return null;
 }
@@ -176,16 +160,43 @@ function updateHover(x, y) {
   requestRender();
 }
 
+function sameHot(a, b) {
+  if (!a || !b) return a === b;
+  if (a.type !== b.type) return false;
+  if (a.type === 'edge') return a.edge === b.edge && same(a.it, b.it);
+  if (a.type === 'corner') return a.corner === b.corner;
+  if (a.type === 'spacing') return a.i === b.i;
+  if (a.type === 'chip') return a.chip.x === b.chip.x && a.chip.y === b.chip.y;
+  return true;
+}
+
+// The handles are worked out while drawing, just after the mouse moved. If one has landed under
+// a mouse that's now standing still, update what a press would grab (and the cursor) right away,
+// instead of waiting for the next mouse move.
+function refreshHot() {
+  if (app.drag || !app.mouse.inside || !app.state.open || app.state.capturing) return;
+  if (!sameHot(findHot(app.mouse.x, app.mouse.y), app.hot)) updateHover(app.mouse.x, app.mouse.y);
+}
+
 function setMouse(x, y, inside) {
   app.mouse.x = x;
   app.mouse.y = y;
   app.mouse.inside = inside;
 }
 
+// Ctrl/⌘ and Shift change what a click picks, so the hover shows that ahead of time.
+function setMods(e) {
+  const mod = !!(e.metaKey || e.ctrlKey);
+  const shift = !!e.shiftKey;
+  if (app.mods.mod === mod && app.mods.shift === shift) return;
+  app.mods = { mod, shift };
+  requestRender();
+}
+
 // ---- pointer --------------------------------------------------------------------------
 
 function onDown(e) {
-  if (e.button !== 0 || !interactive() || app.state.closing) return;
+  if (e.button !== 0 || !interactive() || app.state.closing || app.state.capturing) return;
   e.preventDefault();
   hub.closeEditor(true);
   try {
@@ -220,6 +231,7 @@ function onMove(e) {
   if (!app.state.open) return;
   const x = e.clientX;
   const y = e.clientY;
+  setMods(e);
   const d = app.drag;
   if (d) {
     if (e.pointerId !== d.pointerId) return;
@@ -471,6 +483,8 @@ function beginEdge(d, hot) {
   begin('Resize');
   d.type = 'edge';
   d.edge = hot.edge;
+  d.f = hot.f;
+  d.exact = !!hot.exact;
   d.main = it;
   d.items = group.map(startState);
   d.mainState = d.items.find((s) => same(s.it, it)) || d.items[0];
@@ -637,8 +651,6 @@ function marqueeDrag(d) {
 
 function click(d) {
   const hot = d.hot;
-  const near = Math.hypot(d.sx - lastClick.x, d.sy - lastClick.y) < 5 && performance.now() - lastClick.t < 4000;
-  lastClick = { t: performance.now(), x: d.sx, y: d.sy };
   if (hot && hot.type === 'chip') return hub.openEditor(hot.chip);
   if (hot && hot.type === 'edge') {
     const chip = app.chips.find((c) => containsPt(c, d.sx, d.sy, 1));
@@ -660,24 +672,49 @@ function click(d) {
     setSelection([shapeItem(s)]);
     return;
   }
+  if (d.mod && it.kind === 'el') return modClick(it, d.shift);
   if (d.shift) return toggleSelected(it);
-  const cur = app.sel.length === 1 ? app.sel[0] : null;
-  if (it.kind === 'el' && cur && cur.kind === 'el' && deepContains(cur.el, it.el) && (cur.el === it.el || near)) {
-    const p = parentPick(cur.el);
-    if (p) {
-      setSelection([elItem(p)]);
-      hub.toast(`Picked the box around it: ${describe(p)}`, 1400);
-    }
+  setSelection([it]);
+}
+
+function modClick(it, shift) {
+  if (shift) {
+    const base = alikeBase(it.el);
+    const list = alikeOf(base);
+    setSelection(list.map(elItem));
+    hub.toast(
+      list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
+      2600,
+    );
     return;
   }
-  setSelection([it]);
+  const sel = liveSel().filter((s) => s.kind === 'el');
+  const inside = sel.filter((s) => deepContains(s.el, it.el));
+  if (!inside.length) {
+    setSelection([it]);
+    return;
+  }
+  // one level up: the picked thing becomes the box around it (all of them, if several are picked)
+  const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el) || s.el);
+  const uniq = [];
+  for (const el of up) if (!uniq.includes(el)) uniq.push(el);
+  const outer = uniq.filter((el) => !uniq.some((o) => o !== el && deepContains(o, el)));
+  const moved = outer.some((el) => !sel.some((s) => s.el === el));
+  if (!moved) {
+    hub.toast("That's already the biggest box", 1400);
+    return;
+  }
+  setSelection(outer.map(elItem));
+  hub.toast(outer.length === 1 ? `Picked the box around it: ${describe(outer[0])}` : `Picked the boxes around them (${outer.length})`, 1600);
 }
 
 function onContext(e) {
   if (!interactive()) return;
-  const s = shapeAt(e.clientX, e.clientY, 2);
   e.preventDefault();
   e.stopPropagation();
+  // On a Mac, Control-click also opens the menu: here it means "pick the box around it".
+  if (e.ctrlKey && e.button === 0) return;
+  const s = shapeAt(e.clientX, e.clientY, 2);
   if (!s) return;
   begin('Remove box');
   touchShapes();
@@ -825,11 +862,21 @@ function onKey(e) {
   const editing = interactive();
   const hasSel = editing && app.sel.length > 0;
   const d = app.drag;
+  setMods(e);
   if (d && (k === 'Shift' || k === 'Meta' || k === 'Control' || k === 'Alt')) {
     d.shift = e.shiftKey;
     d.mod = e.metaKey || e.ctrlKey;
     if (d.type !== 'pending') dragMove(d);
     requestRender();
+    return;
+  }
+  if (st.capturing) {
+    if (k === 'Escape') {
+      hub.cancelCapture();
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    }
     return;
   }
   let handled = false;
@@ -876,6 +923,7 @@ function onKey(e) {
 }
 
 function onKeyUp(e) {
+  setMods(e);
   const d = app.drag;
   if (!d) return;
   d.shift = e.shiftKey;
@@ -894,6 +942,7 @@ function onOut(e) {
 }
 
 function onBlur() {
+  app.mods = { mod: false, shift: false };
   if (app.drag && app.drag.type !== 'pending') {
     const d = app.drag;
     app.drag = null;
@@ -923,6 +972,7 @@ export function attachInteract() {
   window.addEventListener('mouseout', onOut, true);
   window.addEventListener('blur', onBlur);
   hub.cancelDrag = cancelDrag;
+  hub.refreshHot = refreshHot;
 }
 
 export function detachInteract() {

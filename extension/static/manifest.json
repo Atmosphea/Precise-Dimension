@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Precise Dimension",
   "short_name": "Precise Dim",
-  "version": "0.1.0",
-  "description": "See the exact size of everything on a page, draw boxes, move things around, and copy the measurements as words for your coding agent.",
+  "version": "0.2.0",
+  "description": "A measurement tool for your mind. See the exact size of everything on a page, then copy it as words or screenshots for your AI.",
   "minimum_chrome_version": "116",
   "action": {
     "default_title": "Precise Dimension (Alt+Shift+D)",

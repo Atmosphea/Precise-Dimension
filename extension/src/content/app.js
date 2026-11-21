@@ -1,6 +1,8 @@
 // Shared state for the whole overlay. Every module imports this one object.
 
 export const HOST_TAG = 'precise-dimension';
+// Marks boxes that are drawn in by the opening wave instead of the one-by-one cascade.
+export const WAVE = -1;
 
 export const app = {
   // DOM
@@ -38,6 +40,8 @@ export const app = {
   truncated: false,
   openedAt: 0,
   revealed: new WeakMap(), // el -> time it first appeared (so re-collects don't replay the cascade)
+  wave: null, // the opening animation: { t0, ox, oy, maxR, end }
+  reduceMotion: false,
 
   // user-drawn boxes
   shapes: { page: [], canvas: [] },
@@ -52,6 +56,8 @@ export const app = {
   preview: null,
   snapLines: [],
   arrows: [],
+  crowded: false,
+  mods: { mod: false, shift: false }, // Ctrl/⌘ and Shift, for the click previews
   chips: [],
   spacing: null,
   pulses: [],

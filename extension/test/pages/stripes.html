@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stripes — full-page screenshot test</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 -apple-system, system-ui, sans-serif; background: #fff; }
+  header { position: sticky; top: 0; height: 60px; background: rgb(250, 20, 120); z-index: 5; }
+  .s { height: 100px; position: relative; }
+  .s::before { content: ''; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: #000; }
+  .s img { position: absolute; left: 300px; top: 20px; width: 200px; height: 60px; display: block; }
+  .bubble { position: fixed; right: 20px; bottom: 20px; width: 60px; height: 60px; background: rgb(20, 200, 90); z-index: 6; }
+  /* a web app: the page stays put and the middle panel scrolls */
+  body.app { height: 100vh; overflow: hidden; }
+  .grid { display: grid; grid-template-rows: 64px 1fr 40px; grid-template-columns: 220px 1fr; height: 100vh; }
+  .top { grid-column: 1 / 3; background: rgb(250, 20, 120); }
+  .side { background: rgb(230, 230, 240); display: flex; flex-direction: column; justify-content: space-between; padding: 12px; }
+  .side .a { height: 40px; background: rgb(10, 10, 200); }
+  .side .b { height: 40px; background: rgb(200, 120, 0); }
+  main { overflow-y: auto; min-height: 0; }
+  .foot { grid-column: 1 / 3; background: rgb(40, 40, 40); }
+</style>
+</head>
+<body>
+<script>
+  const q = new URLSearchParams(location.search);
+  const n = +q.get('n') || 40;
+  const color = (i) => `rgb(${(i * 37 + 60) % 256}, ${(i * 91 + 30) % 256}, ${(i * 53 + 90) % 256})`;
+  const stripes = (parent) => {
+    for (let i = 0; i < n; i++) {
+      const d = document.createElement('div');
+      d.className = 's';
+      d.style.background = color(i);
+      if (q.get('lazy') && i === Math.floor(n * 0.7)) {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.src = 'swatch.svg?delay=700';
+        d.appendChild(img);
+      }
+      parent.appendChild(d);
+    }
+  };
+  if (q.get('app')) {
+    document.body.className = 'app';
+    document.body.insertAdjacentHTML('beforeend', '<div class="grid"><div class="top"></div><aside class="side"><div class="a"></div><div class="b"></div></aside><main></main><div class="foot"></div></div>');
+    stripes(document.querySelector('main'));
+  } else {
+    document.body.appendChild(document.createElement('header'));
+    stripes(document.body);
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    document.body.appendChild(b);
+  }
+</script>
+</body>
+</html>

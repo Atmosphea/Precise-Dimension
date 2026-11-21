@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dense — crowded edit-mode test</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 -apple-system, system-ui, sans-serif; background: #f8fafc; color: #0f172a; }
+  .bar { display: flex; gap: 4px; padding: 8px; background: #fff; border-bottom: 1px solid #e2e8f0; }
+  .bar button { width: 28px; height: 28px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; padding: 0; display: grid; place-items: center; }
+  .bar button i { width: 14px; height: 14px; background: #94a3b8; border-radius: 3px; display: block; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 16px; max-width: 520px; }
+  .tag { padding: 3px 8px; border-radius: 999px; background: #e0e7ff; font-size: 12px; }
+  .hero { margin: 40px; height: 380px; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; position: relative; }
+  .hero .pic { position: absolute; left: 60px; top: 60px; width: 300px; height: 200px; background: #c7d2fe; border-radius: 12px; }
+</style>
+</head>
+<body>
+<div class="bar" id="bar"></div>
+<div class="tags" id="tags"></div>
+<div class="hero"><div class="pic"></div></div>
+<script>
+  for (let i = 0; i < 16; i++) document.getElementById('bar').insertAdjacentHTML('beforeend', '<button><i></i></button>');
+  const words = 'layout grid flex gap padding margin border radius shadow font size weight color spacing align center stretch wrap order basis grow shrink auto inline block'.split(' ');
+  for (const w of words) document.getElementById('tags').insertAdjacentHTML('beforeend', `<span class="tag">${w}</span>`);
+</script>
+</body>
+</html>

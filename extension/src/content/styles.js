@@ -46,6 +46,7 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .bars {
   position: absolute; top: 12px; right: 12px; z-index: 4;
   display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+  transform-origin: top right;
 }
 .bar { display: flex; align-items: center; gap: 8px; }
 .btn {
@@ -211,7 +212,29 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
   visibility: hidden !important; transition: none !important;
 }
 
-@media (max-width: 640px) {
-  .bars { transform: scale(.8); transform-origin: top right; }
+/* full-page screenshot progress card (it hides for the instant each piece is taken) */
+.hud {
+  position: absolute; top: 14px; left: 50%; z-index: 8;
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 16px 11px 10px;
+  background: #fff; border-radius: 14px; color: #111; pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.08), 0 12px 32px rgba(0,0,0,.16);
+  opacity: 0; transform: translate(-50%, -10px) scale(.96);
+  transition: opacity .2s, transform .3s cubic-bezier(.2,1.25,.3,1);
 }
+.hud.on { opacity: 1; transform: translate(-50%, 0); }
+.hud.snap { visibility: hidden !important; transition: none !important; }
+.hud-prev { display: block; flex: none; border-radius: 4px; background: #f3f4f6; box-shadow: 0 0 0 1px rgba(0,0,0,.08); }
+.hud-txt { display: flex; flex-direction: column; gap: 3px; min-width: 160px; padding-top: 1px; }
+.hud-title { font-size: 12px; font-weight: 700; letter-spacing: -.1px; }
+.hud-sub { font-size: 11px; color: #6b7280; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hud-bar { position: relative; height: 4px; border-radius: 2px; background: #e5e7eb; overflow: hidden; margin-top: 5px; }
+.hud-bar > i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2563eb; border-radius: 2px; transition: width .25s ease; }
+.pd[data-mode="change"] .hud-bar > i { background: #7c3aed; }
+.hud-esc { font-size: 10px; color: #9ca3af; margin-top: 3px; }
+
+/* camera flash after a screenshot: white for a moment, then it fades away */
+.flash { position: absolute; inset: 0; z-index: 30; background: #fff; pointer-events: none; animation: pdflash .72s cubic-bezier(.3,0,.2,1) forwards; }
+@keyframes pdflash { 0% { opacity: 1; } 28% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes pdflashsoft { 0% { opacity: .4; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .flash { animation: pdflashsoft .4s ease-out forwards; } }
 `;
