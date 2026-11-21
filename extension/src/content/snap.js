@@ -1,5 +1,5 @@
 // Smart snapping to nearby edges and centers, with pink guide lines.
-import { app } from './app.js';
+import { app, minLevel } from './app.js';
 import { activeShapes, shapeRect } from './shapes.js';
 import { deepContains } from './util.js';
 
@@ -24,8 +24,9 @@ export function buildTargets(movingItems = []) {
   for (const s of activeShapes()) if (!movingShapes.has(s)) add(shapeRect(s));
   if (!app.state.canvasMode) {
     let n = 0;
+    const L = minLevel();
     for (const c of app.cands) {
-      if (c.dup || c.w * c.h < 300) continue;
+      if (c.dup || c.w * c.h < 300 || c.lv < L) continue;
       if (c.x > app.vw || c.y > app.vh || c.x + c.w < 0 || c.y + c.h < 0) continue;
       if (movingEls.some((m) => deepContains(m, c.el))) continue;
       add({ x: c.x, y: c.y, w: c.w, h: c.h });

@@ -78,10 +78,22 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .btn.small:hover { color: #111; }
 .btn .txt { font-size: 10.5px; font-weight: 700; letter-spacing: -.2px; line-height: 1; pointer-events: none; }
 .btn.long .txt { font-size: 8.8px; letter-spacing: -.35px; }
-.btn.guides .i-off { display: none; }
-.btn.guides.off .i-on { display: none; }
-.btn.guides.off .i-off { display: block; }
-.btn.guides.off { color: #9ca3af; }
+/* the eye joined to the detail level: [eye | Blocks] */
+.btn.duo { width: auto; display: flex; align-items: stretch; padding: 0; cursor: default; }
+.btn.duo:hover, .btn.duo:active { background-color: #fff; }
+.duo > .seg {
+  height: 34px; display: grid; place-items: center; color: inherit;
+  transition: background-color .15s, color .15s;
+}
+.duo > .seg.eye { width: 33px; padding-left: 2px; border-radius: 17px 4px 4px 17px; }
+.duo > .seg.lvl { min-width: 46px; padding: 0 12px 0 8px; border-radius: 4px 17px 17px 4px; box-shadow: inset 1px 0 0 rgba(0,0,0,.08); }
+.duo > .seg:hover { background-color: #f3f4f6; }
+.duo > .seg:active { background-color: #e5e7eb; }
+.duo .seg svg { width: 17px; height: 17px; display: block; pointer-events: none; }
+.duo .seg .i-off { display: none; }
+.duo.off .seg .i-on { display: none; }
+.duo.off .seg .i-off { display: block; }
+.duo.off > .seg { color: #9ca3af; }
 
 /* fill strength slider */
 .btn.pill { width: auto; padding: 0 12px 0 12px; display: flex; gap: 7px; align-items: center; cursor: default; }
@@ -144,7 +156,11 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .bar.purple.shown > .btn.split:hover, .bar.purple > .btn.split.hold { background-color: transparent; box-shadow: none; }
 .purple .st { background: #7c3aed; color: #fff; }
 .purple .st.no { background: #7c3aed; color: #fecaca; }
-.purple .btn.guides.off { color: #c4b5fd; }
+.purple .btn.duo:hover, .purple .btn.duo:active { background-color: #7c3aed; }
+.purple .duo > .seg:hover { background-color: #6d28d9; }
+.purple .duo > .seg:active { background-color: #5b21b6; }
+.purple .duo > .seg.lvl { box-shadow: inset 1px 0 0 rgba(255,255,255,.2); }
+.purple .duo.off > .seg { color: #c4b5fd; }
 .purple .split.dim > .half.l { color: #c4b5fd; }
 
 /* small icon buttons used in flyouts and panels */

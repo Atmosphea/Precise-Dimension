@@ -2,7 +2,7 @@
 import { app } from './app.js';
 import { allRecs, isEdited } from './edits.js';
 import { both, fmt } from './units.js';
-import { describe, selectorFor, rectOf, isRootish } from './util.js';
+import { describe, selectorFor, rectOf, isRootish, deepContains, containsRect, parentOf } from './util.js';
 import { flexInfo } from './tools.js';
 
 function dir(n, pos, neg) {
@@ -30,6 +30,24 @@ function flexWords(f) {
   if (f.align && f.align !== 'normal' && f.align !== 'stretch') parts.push(`align-items ${f.align}`);
   if (f.wrap === 'wrap') parts.push('wraps');
   return parts.join(', ');
+}
+
+// Where something pulled out of its box ended up, in words: the box it now sits over, and how
+// far from that box's corner (plus where that is on the page).
+function spotWords(el, r) {
+  const page = `${Math.round(r.x + window.scrollX)}px from the page's left and ${Math.round(r.y + window.scrollY)}px from the page's top`;
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
+  if (cx < 0 || cy < 0 || cx >= app.vw || cy >= app.vh) return page;
+  let under = null;
+  try {
+    under = document.elementsFromPoint(cx, cy).find((e) => e !== app.host && !deepContains(el, e) && !isRootish(e)) || null;
+  } catch {}
+  let box = under;
+  while (box && !isRootish(box) && !containsRect(rectOf(box), r, 1)) box = parentOf(box);
+  if (!box || isRootish(box)) return page;
+  const b = rectOf(box);
+  return `over ${describe(box)} (\`${selectorFor(box)}\`), ${Math.round(r.x - b.x)}px from its left and ${Math.round(r.y - b.y)}px from its top (${page})`;
 }
 
 export function buildEditsText() {
@@ -62,7 +80,18 @@ export function buildEditsText() {
     const now = rectOf(el);
     if (r.collapsed) out.push('remove it (the space it took is closed up)');
     else if (r.deleted) out.push('hide/remove it (its space stays empty for now)');
-    else {
+    else if (r.free) {
+      const home = r.home && r.home.isConnected ? r.home : el.parentElement;
+      const from = home && !isRootish(home) ? `out of ${describe(home)} (\`${selectorFor(home)}\`)` : 'out of the box it was in';
+      out.push(`take it ${from} so the rest close up the gap, and put it ${spotWords(el, now)}`);
+      const sizeChanged = Math.abs(now.w - r.orig.w) > 0.5 || Math.abs(now.h - r.orig.h) > 0.5;
+      if (sizeChanged) {
+        const parts = [];
+        if (Math.abs(now.w - r.orig.w) > 0.5) parts.push(`width ${both(r.orig.w, 'w', c)} → ${both(now.w, 'w', c)}`);
+        if (Math.abs(now.h - r.orig.h) > 0.5) parts.push(`height ${both(r.orig.h, 'h', c)} → ${both(now.h, 'h', c)}`);
+        out.push(parts.join('; '));
+      }
+    } else {
       const sizeChanged = Math.abs(now.w - r.orig.w) > 0.5 || Math.abs(now.h - r.orig.h) > 0.5;
       if (sizeChanged) {
         const parts = [];

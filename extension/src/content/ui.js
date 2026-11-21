@@ -1,6 +1,6 @@
 // The white and purple circle toolbars, their flyouts and panels, tooltips, hints,
 // toasts, and the little box for typing an exact size.
-import { app, requestRender, requestFull, keepAnimating } from './app.js';
+import { app, requestRender, requestFull, keepAnimating, DETAILS } from './app.js';
 import { hub } from './hub.js';
 import { iconEl } from './icons.js';
 import { UNITS, parseDim, rawValue } from './units.js';
@@ -144,17 +144,16 @@ let hintTimer = 0;
 let toastTimer = 0;
 let selHintShown = false;
 
+// Alt is called Option on a Mac keyboard.
+const ALT = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '') ? 'Option' : 'Alt';
+
 function hintFor() {
   const st = app.state;
   if (st.canvasMode) return 'Drag to draw boxes · Shift-drag or double-click-drag to select · Esc leaves the canvas';
   if (st.mode === 'draw') return 'Drag to draw a box · drag a box to move it · grab the arrows on its edges to resize · Esc to stop';
   if (st.mode === 'change')
-    return `Click to pick anything · ${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks everything like it · drag to move · W A S D resize`;
-  return 'Hover anything to see its size and spacing · U switches units · H hides guides · Esc closes';
-}
-
-function modKey() {
-  return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '') ? 'Ctrl/⌘' : 'Ctrl';
+    return `Click to pick anything · double-click or ${ALT}-click for the box around it · ${ALT}+Shift-click picks everything like it · drag anything anywhere, even out of its box`;
+  return 'Hover anything to see its size and spacing · U switches units · L changes the detail · H hides guides · Esc closes';
 }
 
 export function showHint(text, ms = 6500) {
@@ -364,6 +363,33 @@ export function toggleGuides() {
   sync();
   requestFull();
   toast(app.state.guides ? 'Guides on' : 'Guides off — your boxes and edits stay', 1500);
+}
+
+// Detail levels: everything / just the blocks / just the big sections. What you can pick follows.
+const LEVEL = {
+  all: ['All', 'every box, down to each word'],
+  blocks: ['Blocks', 'cards, columns, buttons and pictures — no loose words'],
+  sections: ['Sections', 'just the big parts: header, sections, sidebar, footer'],
+};
+
+function levelTip(d) {
+  const next = DETAILS[(DETAILS.indexOf(d) + 1) % DETAILS.length];
+  return `Detail: ${LEVEL[d][0]} — ${LEVEL[d][1]} · click for ${LEVEL[next][0]} (L)`;
+}
+
+export function cycleDetail(dir = 1) {
+  const st = app.state;
+  if (!st.guides) {
+    st.guides = true; // with guides hidden, the first click just shows them again at this level
+  } else {
+    const i = DETAILS.indexOf(st.detail);
+    st.detail = DETAILS[(i + dir + DETAILS.length) % DETAILS.length];
+  }
+  app.hover = null;
+  savePrefs();
+  sync();
+  requestFull();
+  toast(`Detail: ${LEVEL[st.detail][0]} — ${LEVEL[st.detail][1]}`, 1800);
 }
 
 let canvasPrev = 'measure';
@@ -738,9 +764,14 @@ export function sync() {
   R.draw.classList.toggle('on', st.mode === 'draw' && !st.canvasMode);
   R.canvas.classList.toggle('on', st.canvasMode);
   R.change.classList.toggle('on', st.mode === 'change' && !st.canvasMode);
-  for (const g of [R.guidesW, R.guidesP]) {
-    g.classList.toggle('off', !st.guides);
-    g.dataset.tip = st.guides ? 'Hide guides (H)' : 'Show guides (H)';
+  for (const g of [R.detailW, R.detailP]) {
+    g.w.classList.toggle('off', !st.guides);
+    const tip = st.guides ? 'Hide all guides (H)' : 'Show guides (H)';
+    g.eye.dataset.tip = tip;
+    g.eye.setAttribute('aria-label', tip);
+    g.txt.textContent = LEVEL[st.detail][0];
+    g.lvl.dataset.tip = levelTip(st.detail);
+    g.lvl.setAttribute('aria-label', `Detail level: ${LEVEL[st.detail][0]}`);
   }
   R.unitTxt.textContent = st.unit;
   R.unit.classList.toggle('long', st.unit.length > 3);
@@ -754,7 +785,7 @@ export function sync() {
   updateFlexPanel();
   if (st.mode === 'change' && !st.canvasMode && app.sel.length === 1 && !selHintShown) {
     selHintShown = true;
-    showHint(`${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7000);
+    showHint(`Double-click or ${ALT}-click for the box around it · ${ALT}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7000);
   }
   app.uiRectDirty = true;
 }
@@ -862,7 +893,7 @@ export function buildUI() {
       setMode('change');
     } else setMode(st.mode === 'change' ? 'measure' : 'change');
   });
-  R.guidesW = guidesButton(white);
+  R.detailW = detailPill(white);
 
   // purple bar (change mode)
   R.reflow = split(
@@ -896,7 +927,7 @@ export function buildUI() {
     ],
     ['Reset everything back to the original page', 'reset', (e, w) => runTool(w, resetAll)],
   );
-  R.guidesP = guidesButton(purple);
+  R.detailP = detailPill(purple);
 
   // flyouts, panels, feedback
   R.fly = mk('div', 'fly ui', root);
@@ -938,19 +969,33 @@ export function buildUI() {
     setCanvas,
     cycleUnit,
     toggleGuides,
+    cycleDetail,
     group: () => runTool(R.group, group),
     ungroup: () => runTool(R.group, ungroup),
     cancelCapture: stopCapture,
   });
 }
 
-function guidesButton(parent) {
-  const b = circle(parent, 'guides', null, 'Hide guides (H)', () => toggleGuides());
+// The eye (hide or show every guide) joined to the detail level (All / Blocks / Sections).
+function detailPill(parent) {
+  const w = mk('div', 'btn duo detail', parent);
+  const eye = mk('button', 'seg eye', w);
+  eye.type = 'button';
   const on = iconEl('eye');
   on.classList.add('i-on');
   const off = iconEl('eyeOff');
   off.classList.add('i-off');
-  b.prepend(off);
-  b.prepend(on);
-  return b;
+  eye.append(on, off);
+  const lvl = mk('button', 'seg lvl', w);
+  lvl.type = 'button';
+  const txt = mk('span', 'txt', lvl, LEVEL[app.state.detail][0]);
+  eye.addEventListener('click', () => {
+    hideTip();
+    toggleGuides();
+  });
+  lvl.addEventListener('click', (e) => {
+    hideTip();
+    cycleDetail(e.shiftKey ? -1 : 1);
+  });
+  return { w, eye, lvl, txt };
 }

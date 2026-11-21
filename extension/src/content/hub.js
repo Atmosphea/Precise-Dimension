@@ -13,6 +13,7 @@ export const hub = {
   close: noop,
   cycleUnit: noop,
   toggleGuides: noop,
+  cycleDetail: noop,
   group: noop,
   ungroup: noop,
   cancelDrag: noop,

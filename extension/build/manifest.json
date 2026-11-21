@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Precise Dimension",
   "short_name": "Precise Dim",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "A measurement tool for your mind. See the exact size of everything on a page, then copy it as words or screenshots for your AI.",
   "minimum_chrome_version": "116",
   "action": {

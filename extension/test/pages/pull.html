@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pull-out test page</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, system-ui, sans-serif; color: #0f172a; background: #f8fafc; }
+  /* a sticky header that cuts off anything spilling out of it */
+  header { position: sticky; top: 0; z-index: 10; height: 64px; overflow: hidden; display: flex; align-items: center; justify-content: space-between; padding: 0 40px; background: #fff; border-bottom: 1px solid #e2e8f0; }
+  .brand { font-weight: 800; }
+  .menu { display: flex; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .menu li a { display: block; padding: 6px 12px; color: rgb(190, 20, 60); text-decoration: none; font-size: 15px; }
+  .go { padding: 8px 14px; border-radius: 8px; background: #0f172a; color: #fff; border: 0; font: inherit; font-size: 14px; }
+  main { position: relative; z-index: 20; padding: 40px; }
+  /* a sideways-scrolling strip of tags */
+  .strip { display: flex; gap: 10px; overflow-x: auto; padding: 8px; background: #eef2ff; border-radius: 12px; width: 520px; }
+  .tag { flex: none; padding: 4px 10px; border-radius: 999px; background: rgb(20, 160, 90); color: #fff; font-size: 13px; }
+  /* a card that clips its corners */
+  .card { margin-top: 40px; width: 360px; height: 220px; border-radius: 20px; overflow: hidden; background: linear-gradient(160deg, #c7d2fe, #a5f3fc); position: relative; padding: 24px; }
+  .card .cta { padding: 8px 14px; border-radius: 8px; background: rgb(30, 64, 175); color: #fff; border: 0; font: inherit; font-size: 14px; }
+  .spacer { height: 1600px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">Clipco</span>
+  <ul class="menu"><li><a href="#">Product</a></li><li><a href="#">Pricing</a></li><li><a href="#">Customers</a></li><li><a href="#">Docs</a></li></ul>
+  <button class="go">Sign up</button>
+</header>
+<main>
+  <h1>Things that are hard to drag out</h1>
+  <div class="strip"><span class="tag">alpha</span><span class="tag">beta</span><span class="tag">gamma</span><span class="tag">delta</span><span class="tag">epsilon</span><span class="tag">zeta</span><span class="tag">eta</span></div>
+  <div class="card"><h3>Clipped card</h3><button class="cta">Try it</button></div>
+  <div class="spacer"></div>
+</main>
+</body>
+</html>

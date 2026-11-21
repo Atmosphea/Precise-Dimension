@@ -1,6 +1,7 @@
 // Finds every visible element on the page and keeps their boxes up to date.
 import { app, WAVE } from './app.js';
-import { clamp, cssPx, isOurs, deepContains } from './util.js';
+import { clamp, cssPx, isOurs, deepContains, hasPaint } from './util.js';
+import { isFree } from './edits.js';
 
 const SKIP = new Set([
   'SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'TITLE', 'NOSCRIPT', 'TEMPLATE', 'BR', 'WBR',
@@ -9,6 +10,9 @@ const SKIP = new Set([
 // Measure these, but don't look inside them.
 const LEAF = new Set(['svg', 'SVG', 'IFRAME', 'VIDEO', 'AUDIO', 'CANVAS', 'IMG', 'PICTURE', 'INPUT', 'TEXTAREA', 'SELECT', 'OBJECT', 'EMBED', 'math', 'MATH']);
 const MAX = 5000;
+// Things that are boxes in their own right even without a background (for the "Blocks" level).
+const MEDIA = new Set(['svg', 'SVG', 'IFRAME', 'VIDEO', 'AUDIO', 'CANVAS', 'IMG', 'PICTURE', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'OBJECT', 'EMBED', 'math', 'MATH']);
+const ICONISH = new Set(['svg', 'SVG', 'IMG', 'PICTURE', 'CANVAS', 'math', 'MATH']);
 
 function childrenOf(el) {
   if (el.shadowRoot) return el.shadowRoot.children;
@@ -144,7 +148,9 @@ export function collect() {
     const isRoot = el === document.documentElement || el === document.body;
     const r = el.getBoundingClientRect();
     const pos = cs.position;
-    const fixed = pos === 'fixed';
+    // pulled out of its box: it floats above the page, nothing around it cuts it off
+    const lifted = ctx.top || isFree(el);
+    const fixed = pos === 'fixed' || (lifted && !ctx.top);
     const dynamic = ctx.dynamic || fixed || pos === 'sticky';
     if (band && !isRoot && !dynamic) {
       const top = r.top + sy;
@@ -196,19 +202,29 @@ export function collect() {
         gapY: cssPx(cs.rowGap),
         text: hasOwnText(el),
         textR: null,
-        occ: ctx.occ || null,
+        occ: lifted ? null : ctx.occ || null,
         isOcc: false,
+        top: lifted,
         at: 0,
+        // detail levels: 0 = words and little icons, 1 = blocks, 2 = the page's big sections
+        lv: 0,
+        boxKids: 0,
+        paint: hasPaint(cs),
+        media: MEDIA.has(tag),
+        inl: display === 'inline',
       };
       if (cand.text && texts++ < 2500) cand.textR = textBox(el, r);
-      if ((fixed || pos === 'sticky' || ctx.inFixed) && !ctx.occ && r.width >= 8 && r.height >= 8 && opaqueBg(cs)) {
+      if ((fixed || pos === 'sticky' || ctx.inFixed) && !lifted && !ctx.occ && r.width >= 8 && r.height >= 8 && opaqueBg(cs)) {
         cand.isOcc = true;
         occluders.push(cand);
       }
       out.push(cand);
     }
 
-    if (LEAF.has(tag)) return;
+    if (LEAF.has(tag)) {
+      if (cand) settle(cand, ctx);
+      return;
+    }
 
     let nclip = clip;
     let childDynamic = dynamic;
@@ -237,19 +253,31 @@ export function collect() {
       nclip = k;
       if (scrollish && (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)) childDynamic = true;
     }
+    if (lifted) childDynamic = true;
     const nctx = {
       cand: cand ? (cand.dup ? cand.parent : cand) : ctx.cand,
+      up: cand || ctx.up,
       dynamic: childDynamic,
       clip: nclip,
-      occ: cand && cand.isOcc ? cand : ctx.occ,
-      inFixed: ctx.inFixed || fixed || pos === 'sticky',
+      occ: cand && cand.isOcc ? cand : lifted ? null : ctx.occ,
+      inFixed: (ctx.inFixed || fixed || pos === 'sticky') && !lifted,
+      top: lifted,
     };
     for (const k of childrenOf(el)) visit(k, nctx);
+    if (cand) settle(cand, ctx);
+  };
+
+  // Once everything inside a box is measured: is it a block, or just words / a small icon?
+  const settle = (c, ctx) => {
+    const words = !c.paint && !c.media && c.boxKids === 0 && (c.text || c.inl);
+    const icon = ICONISH.has(c.el.tagName) && !c.paint && c.w <= 28 && c.h <= 28;
+    c.lv = words || icon ? 0 : 1;
+    if (c.lv && ctx.up) ctx.up.boxKids++;
   };
 
   const start = document.documentElement;
   if (start) {
-    for (const k of start.children) visit(k, { cand: null, dynamic: false, clip: null, occ: null, inFixed: false });
+    for (const k of start.children) visit(k, { cand: null, up: null, dynamic: false, clip: null, occ: null, inFixed: false, top: false });
   }
 
   // Some fixed layers are page backgrounds that sit behind everything: only keep the ones
@@ -260,6 +288,8 @@ export function collect() {
     for (const o of behind) o.isOcc = false;
     for (const c of out) if (c.occ && behind.has(c.occ)) c.occ = null;
   }
+
+  markSections(out, band);
 
   // How new boxes appear: while the opening wave is still spreading they're drawn in by it;
   // after that, boxes that show up later (scrolling, new content) fade in one by one.
@@ -292,6 +322,85 @@ export function collect() {
   app.lastCollect = performance.now();
   app.collectMs = app.lastCollect - t0;
   return out;
+}
+
+// ---- sections ------------------------------------------------------------------------------
+// The page's big parts (header, hero, sidebar, the bands down the page, footer), found the way a
+// designer would: start from the outermost boxes and open up any box that is just a frame around
+// a few page-wide bands or full-height columns. Everything left is a section.
+
+const SPLIT_MIN = 0.3; // a box has to cover this much of the page before it can be opened up
+
+function markSections(out, band) {
+  const de = document.documentElement;
+  const sy = window.scrollY;
+  const y1 = band ? band.top : -Infinity;
+  const y2 = band ? band.bottom : Infinity;
+  const pageW = Math.max(app.vw, de.scrollWidth || 0);
+  const pageH = band ? band.bottom - band.top : Math.max(app.vh, de.scrollHeight || 0);
+  const pageArea = pageW * pageH;
+  // areas in page coordinates, and only the stretch that was measured on very big pages
+  const span = (c) => {
+    const a = Math.max(c.y + sy, y1);
+    const b = Math.min(c.y + sy + c.h, y2);
+    return [a, b];
+  };
+  const area = (c) => {
+    const [a, b] = span(c);
+    return Math.max(0, b - a) * c.w;
+  };
+  const overlap = (k, n) => {
+    const [ka, kb] = span(k);
+    const [na, nb] = span(n);
+    const w = Math.min(k.x + k.w, n.x + n.w) - Math.max(k.x, n.x);
+    const h = Math.min(kb, nb) - Math.max(ka, na);
+    return w > 0 && h > 0 ? w * h : 0;
+  };
+  const kids = new Map();
+  const roots = [];
+  for (const c of out) {
+    if (c.dup || c.lv < 1) continue;
+    if (c.parent) {
+      let l = kids.get(c.parent);
+      if (!l) kids.set(c.parent, (l = []));
+      l.push(c);
+    } else roots.push(c);
+  }
+  // the boxes to use instead of n, or null when n is a section itself
+  const split = (n, depth) => {
+    if (depth > 10) return null;
+    const A = area(n);
+    if (A < SPLIT_MIN * pageArea) return null;
+    const ks = (kids.get(n) || []).filter((k) => area(k) > 0);
+    if (!ks.length) return null;
+    // one box inside another: look inside it when it fills the outer one. A plain wrapper (no
+    // background or border of its own, like a centred page column) only needs to fill half.
+    if (ks.length === 1) return overlap(ks[0], n) >= (n.paint ? 0.85 : 0.5) * A ? split(ks[0], depth + 1) : null;
+    let cover = 0;
+    let regions = 0;
+    let regionArea = 0;
+    let thin = 0;
+    for (const k of ks) {
+      const a = overlap(k, n);
+      cover += a;
+      const row = k.w >= 0.8 * n.w;
+      if (row || k.h >= 0.8 * n.h) {
+        regions++;
+        regionArea += a;
+        if (row ? k.h < 0.25 * app.vh : k.w < 0.25 * app.vw) thin++;
+      }
+    }
+    // a long stack of thin rows (a feed, a table of results) is one list, so one section
+    if (regions >= 8 && thin === regions) return null;
+    return regions >= 2 && cover >= 0.5 * A && regionArea >= 0.7 * cover ? ks : null;
+  };
+  const queue = roots.slice();
+  for (let i = 0; i < queue.length && i < 3000; i++) {
+    const c = queue[i];
+    const parts = split(c, 0);
+    if (parts) queue.push(...parts);
+    else c.lv = 2;
+  }
 }
 
 // Update every box for the current frame. Static boxes just follow the page scroll;

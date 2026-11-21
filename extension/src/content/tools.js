@@ -1,6 +1,6 @@
 // Group / ungroup, flex controls, align, even spacing, pulse reflow, magic fix.
 import { app, requestCollect, requestFull, liveFor, keepAnimating } from './app.js';
-import { rectOf, union, isRootish, cssPx, deepContains } from './util.js';
+import { rectOf, union, isRootish, cssPx, deepContains, flips } from './util.js';
 import { ensureRec, applyRec, markCreated, allRecs, isEdited, getRec, setCss } from './edits.js';
 import { begin, commit, touch, touchShapes } from './history.js';
 import { itemRect, startState, applyRect, setSelection, elItem } from './items.js';
@@ -16,7 +16,7 @@ export function captureRects(els) {
   return m;
 }
 
-export function flip(first) {
+export function flip(first, ms = FLIP_MS) {
   let n = 0;
   for (const [el, f] of first) {
     if (!el.isConnected) continue;
@@ -25,15 +25,17 @@ export function flip(first) {
     const dy = f.y - l.y;
     if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
     try {
-      el.animate([{ translate: `${dx}px ${dy}px` }, { translate: '0px 0px' }], {
-        duration: FLIP_MS,
+      const an = el.animate([{ translate: `${dx}px ${dy}px` }, { translate: '0px 0px' }], {
+        duration: ms,
         easing: 'cubic-bezier(.2,.85,.25,1)',
         composite: 'add',
       });
+      flips.add(an);
+      an.onfinish = an.oncancel = () => flips.delete(an);
       n++;
     } catch {}
   }
-  liveFor(FLIP_MS + 60);
+  liveFor(ms + 60);
   return n;
 }
 
@@ -130,6 +132,14 @@ export function group() {
   wrap.setAttribute('data-pd-group', '');
   touch(wrap);
   for (const el of els) touch(el);
+  for (const el of els) {
+    // grouping puts things that were pulled out back into the page first
+    const r = getRec(el);
+    if (r && r.free) {
+      r.free = null;
+      applyRec(r);
+    }
+  }
   const rec = markCreated(wrap);
   rec.name = 'New group';
   rec.css = {
@@ -342,7 +352,8 @@ function visualOrder(kids, parent) {
 }
 
 export function pulseReflow(origin) {
-  const edited = allRecs().filter((r) => r.el.isConnected && !r.created && isEdited(r));
+  // things pulled out of their box stay where you put them
+  const edited = allRecs().filter((r) => r.el.isConnected && !r.created && !r.free && isEdited(r));
   if (origin) pulse(origin.x, origin.y, 'rgba(124,58,237,ALPHA)', 820, 1);
   if (!edited.length) return { ok: true, msg: 'Nothing to reflow yet — move or resize something first' };
   begin('Reflow');
@@ -425,7 +436,7 @@ function nearest(v, list, th) {
 }
 
 export function magicFix(origin) {
-  let targets = allRecs().filter((r) => r.el.isConnected && !r.created && !r.deleted && (Math.abs(r.tx) > 0.5 || Math.abs(r.ty) > 0.5 || r.w != null || r.h != null));
+  let targets = allRecs().filter((r) => r.el.isConnected && !r.created && !r.deleted && !r.free && (Math.abs(r.tx) > 0.5 || Math.abs(r.ty) > 0.5 || r.w != null || r.h != null));
   let items = targets.map((r) => elItem(r.el));
   const shapeSel = app.sel.filter((s) => s.kind === 'shape');
   if (!items.length && app.sel.length) items = app.sel.slice();
@@ -581,8 +592,11 @@ export function resetAll() {
     r.deleted = false;
     r.collapsed = false;
     r.css = {};
-    if (r.origStyle == null) r.el.removeAttribute('style');
-    else r.el.style.cssText = r.origStyle;
+    r.free = null;
+    r.fw = null;
+    r.fh = null;
+    r.freeCss = null;
+    applyRec(r); // back to the page's own style (and back into the page, if it was pulled out)
   }
   commit();
   flip(first);

@@ -1,5 +1,5 @@
 // Draws every guide, label, box, handle and animation onto one full-screen canvas.
-import { app, WAVE, keepAnimating } from './app.js';
+import { app, WAVE, keepAnimating, minLevel } from './app.js';
 import { hub } from './hub.js';
 import { clipRect } from './collect.js';
 import { fmt, fmtGap } from './units.js';
@@ -278,14 +278,17 @@ function drawGuides(ctx, now) {
     glow.addColorStop(0.93, 'rgba(225,248,255,0.9)');
     glow.addColorStop(1, 'rgba(255,255,255,1)');
   }
+  const L = minLevel();
+  app.drawn = 0; // how many boxes are on screen at this detail level
   for (const c of app.cands) {
-    if (c.dup || c.w < 1 || c.h < 1) continue;
+    if (c.dup || c.w < 1 || c.h < 1 || c.lv < L) continue;
     if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
     if (app.hiddenForCapture.size && app.hiddenForCapture.has(c.el)) continue;
     const clip = c.clip ? clipRect(c.clip) : null;
     if (clip === false) continue;
     if (clip && (c.x >= clip.x + clip.w || c.y >= clip.y + clip.h || c.x + c.w <= clip.x || c.y + c.h <= clip.y)) continue;
-    const under = occ.length && !c.isOcc && !c.occ ? occ.filter((o) => overlapsR(o, c)) : null;
+    // pulled-out things float above sticky bars, so those never hide them
+    const under = occ.length && !c.isOcc && !c.occ && !c.top ? occ.filter((o) => overlapsR(o, c)) : null;
     if (under && under.some((o) => o.x <= c.x && o.y <= c.y && o.x + o.w >= c.x + c.w && o.y + o.h >= c.y + c.h)) continue;
     const hidden = under && under.length ? under : null;
     // how far this box is drawn in
@@ -313,6 +316,7 @@ function drawGuides(ctx, now) {
       e = easeOutCubic(p);
       fp = clamp((e - 0.2) / 0.8, 0, 1);
     }
+    app.drawn++;
     const col = hueFor(c.depth, mode);
     const clipped = clip && !(c.x >= clip.x && c.y >= clip.y && c.x + c.w <= clip.x + clip.w && c.y + c.h <= clip.y + clip.h);
     const saved = clipped || hidden || cut;
@@ -423,7 +427,7 @@ function drawLabels(ctx, vis, mode, now, w) {
     const ok = (r) => {
       if (r.x < 0 || r.y < 0 || r.x + r.w > app.vw || r.y + r.h > app.vh) return false;
       if (v.clip && (r.y + r.h > v.clip.y + v.clip.h + 1 || r.x + r.w > v.clip.x + v.clip.w + 1)) return false;
-      if (app.occRects && app.occRects.length && !c.isOcc && !c.occ) {
+      if (app.occRects && app.occRects.length && !c.isOcc && !c.occ && !c.top) {
         for (const o of app.occRects) if (overlapsR(o, r)) return false;
       }
       if (words.hits(r, 0.5)) return false;
@@ -567,17 +571,18 @@ function drawMeasureHover(ctx, now) {
 }
 
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
-export const MOD_NAME = MAC ? 'Ctrl/⌘' : 'Ctrl';
+// Alt is called Option (⌥) on a Mac keyboard.
+export const ALT_NAME = MAC ? 'Option' : 'Alt';
 
-// What a Ctrl-click would pick: the thing under the mouse, or, when that's inside what's
+// What an Alt-click would pick: the thing under the mouse, or, when that's inside what's
 // already picked, the box around the current pick (one level up each click).
 export function climbTarget(el) {
   const cur = app.sel.length === 1 && app.sel[0].kind === 'el' ? app.sel[0].el : null;
-  if (cur && cur.isConnected && deepContains(cur, el)) return parentPick(cur) || cur;
+  if (cur && cur.isConnected && deepContains(cur, el)) return parentPick(cur, minLevel()) || cur;
   return el;
 }
 
-// The thing whose look-alikes a Ctrl+Shift-click would pick.
+// The thing whose look-alikes an Alt+Shift-click would pick.
 export function alikeBase(el) {
   const cur = app.sel.length === 1 && app.sel[0].kind === 'el' ? app.sel[0].el : null;
   return cur && cur.isConnected && deepContains(cur, el) ? cur : el;
@@ -589,16 +594,16 @@ function drawChangeHover(ctx, now) {
   const el = h.el;
   const mods = app.mods;
   const col = [270, 88, 58];
-  if (mods.mod && mods.shift) return drawAlikePreview(ctx, el, now);
+  if (mods.alt && mods.shift) return drawAlikePreview(ctx, el, now);
   let target = el;
-  if (mods.mod) target = climbTarget(el);
+  if (mods.alt) target = climbTarget(el);
   const r = rectOf(target);
   if (r.w < 1 || r.h < 1) return;
   const c = app.candByEl.get(target) || itemCtx(elItem(target));
   hoverBox(ctx, target, r, c, col, now, true);
   if (c.flex || c.grid) drawFlexGaps(ctx, target, r, c);
   const picked = app.sel.some((s) => s.kind === 'el' && s.el === target);
-  if (mods.mod && target !== el) infoChip(ctx, r, `${MOD_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
+  if (mods.alt && target !== el) infoChip(ctx, r, `${ALT_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
   else if (!picked) infoChip(ctx, r, elInfo(target, r, c), hsla(col, 0.97, -12));
 }
 
@@ -626,7 +631,7 @@ function drawAlikePreview(ctx, el, now) {
   ctx.restore();
   const r = rectOf(base);
   const n = list.length;
-  const s = n > 1 ? `${MOD_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
+  const s = n > 1 ? `${ALT_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
   infoChip(ctx, r, s, hsla(col, 0.97, -18));
   popped(base, r, now);
 }
@@ -719,8 +724,9 @@ function drawOuterDistances(ctx, r, exclude) {
     }
   };
   if (!app.state.canvasMode && app.state.guides) {
+    const L = minLevel();
     for (const c of app.cands) {
-      if (c.dup || c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
+      if (c.dup || c.lv < L || c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
       if (exclude && exclude.some((e) => deepContains(e, c.el))) continue;
       consider(c);
     }
@@ -1053,10 +1059,11 @@ function edgeUnderCursor(mx, my, pageEls, crowded) {
   if (crowded && !inSel) for (const s of activeShapes()) test(shapeRect(s), { it: shapeItem(s) });
   if (pageEls && crowded && !inSel) {
     const onBar = app.occRects && app.occRects.some((o) => containsPt(o, mx, my));
+    const L = minLevel();
     for (const c of app.cands) {
-      if (c.dup || c.w < 6 || c.h < 6) continue;
+      if (c.dup || c.w < 6 || c.h < 6 || c.lv < L) continue;
       if (c.x > mx + 8 || c.x + c.w < mx - 8 || c.y > my + 8 || c.y + c.h < my - 8) continue;
-      if (onBar && !c.isOcc && !c.occ) continue; // it's under a sticky header right here
+      if (onBar && !c.isOcc && !c.occ && !c.top) continue; // it's under a sticky header right here
       if (c.clip) {
         const k = clipRect(c.clip);
         if (k === false || (k && !containsPt(k, mx, my, 2))) continue;
@@ -1103,8 +1110,9 @@ function computeArrows() {
   for (const s of activeShapes()) push(shapeItem(s), shapeRect(s), s);
   const pageEls = app.state.mode === 'change' && !app.state.canvasMode && app.state.guides;
   if (pageEls) {
+    const L = minLevel();
     for (const c of app.cands) {
-      if (c.dup || c.w < 10 || c.h < 10) continue;
+      if (c.dup || c.w < 10 || c.h < 10 || c.lv < L) continue;
       if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
       if (c.x > m.x + R || c.x + c.w < m.x - R || c.y > m.y + R || c.y + c.h < m.y - R) continue;
       push(null, c, c.el);

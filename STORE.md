@@ -4,10 +4,12 @@ Everything needed to put Precise Dimension on the Chrome Web Store (the same tex
 
 ## Upload file
 
-`extension/dist/precise-dimension-0.2.0.zip`, a zip of the `extension/build` folder. To make it again after a change:
+`extension/dist/precise-dimension-1.0.0.zip`, a zip of the `extension/build` folder. The same file is attached to the GitHub release: https://github.com/Atmosphea/Precise-Dimension/releases/tag/v1.0.0
+
+To make it again after a change:
 
 ```bash
-cd extension && node build.mjs && cd build && zip -r ../dist/precise-dimension-0.2.0.zip . -x '.*'
+cd extension && node build.mjs && cd build && zip -r ../dist/precise-dimension-1.0.0.zip . -x '.*'
 ```
 
 ## Store listing tab
@@ -36,7 +38,9 @@ WHAT IT DOES
 • Hover anything to see its size and the space around it.
 • Draw your own boxes on top of any page, or sketch a layout on a blank canvas, and type exact sizes like 25vw or w-64.
 • Change mode: move and resize anything on the page as if it were a Photoshop file. Things snap to each other, and nothing else gets pushed around.
-• Ctrl-click climbs from an icon to its card to the whole row. Ctrl+Shift-click picks everything like it, so a whole row of cards can be resized at once.
+• Drag anything out of the box it sits in, like a link out of a menu or a button out of a card. It floats above everything and the box closes the gap behind it. Drag it back and it slides into its spot.
+• Double-click (or Alt-click) climbs from an icon to its card to the whole row. Alt+Shift-click picks everything like it, so a whole row of cards can be resized at once.
+• Detail levels: see every box, just the blocks (cards, columns, buttons), or just the big sections of the page.
 • In crowded spots only the edge under your mouse lights up, so you always grab the one you mean.
 • Copy your changes as plain English with exact sizes, ready to paste to your coding agent. For example: Link "Book a demo": width 128px → 179px; move it 30px right.
 • Take screenshots of the screen or the whole page, with every measurement in them. Copy or download.
@@ -48,7 +52,7 @@ PRIVATE BY DESIGN
 It runs only on the tab where you click it. No accounts, no tracking, nothing sent anywhere. Screenshots go straight to your clipboard or your downloads.
 
 SHORTCUTS
-Alt+Shift+D (Option+Shift+D on a Mac) turns it on and off · U units · H hide guides · W A S D resize · Ctrl/⌘+Z undo · Esc steps back
+Alt+Shift+D (Option+Shift+D on a Mac) turns it on and off · U units · L detail level · H hide guides · W A S D resize · Ctrl/⌘+Z undo · Esc steps back
 ```
 
 **Graphics** (all in `extension/store/`):
@@ -73,7 +77,7 @@ Alt+Shift+D (Option+Shift+D on a Mac) turns it on and off · U units · H hide g
 | --- | --- |
 | `activeTab` | Used only when you click the toolbar icon or press the shortcut. It lets the extension draw measurements over that one tab and take screenshots of it. |
 | `scripting` | Puts the measuring overlay into the current tab when you click the icon. Nothing is added to any other tab, and nothing runs in the background. |
-| `storage` | Remembers your own settings (unit, fill strength, guides on or off) on your computer, so they're the same next time. |
+| `storage` | Remembers your own settings (unit, fill strength, guides on or off, detail level) on your computer, so they're the same next time. |
 
 No host permissions are requested.
 

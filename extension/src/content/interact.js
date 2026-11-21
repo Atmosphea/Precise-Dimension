@@ -1,19 +1,23 @@
 // Mouse, keyboard and wheel handling: drawing boxes, picking page elements, moving,
 // resizing, spacing, marquee selection, nudging and shortcuts.
-import { app, requestRender, requestFull, requestCollect } from './app.js';
+import { app, requestRender, requestFull, requestCollect, minLevel } from './app.js';
 import { hub } from './hub.js';
-import { normRect, union, containsPt, containsRect, overlaps, isRootish, isOurs, pageIsTyping, describe, deepContains, parentOf, parentPick } from './util.js';
+import { normRect, union, containsPt, containsRect, overlaps, isRootish, isOurs, pageIsTyping, describe, deepContains, parentOf, parentPick, hasPaint, rectOf, settleFlips } from './util.js';
 import { createShape, removeShape, shapeAt, shapeRect, activeShapes, duplicateShape } from './shapes.js';
 import { elItem, shapeItem, same, itemRect, isSelected, setSelection, toggleSelected, startState, applyRect, itemCtx } from './items.js';
 import { begin, commit, cancel, undo, redo, canUndo, canRedo, touch, touchShapes } from './history.js';
 import { buildTargets, snapMove, snapEdges, SNAP } from './snap.js';
 import { snapToUnit, unitStep } from './units.js';
-import { setDeleted } from './edits.js';
+import { setDeleted, beginOp, applyRec, moveTo, pullOut, putBack, canPull, isFree } from './edits.js';
 import { computeSpacing, alikeBase } from './render.js';
 import { alikeOf, alikeLabel } from './alike.js';
+import { captureRects, flip } from './tools.js';
 
-let lastUp = { t: 0, x: -99, y: -99 };
+let lastUp = { t: 0, x: -99, y: -99, click: false, count: 0 };
 let cursor = '';
+let toldPull = false;
+const MULTI_MS = 500; // clicks closer together than this count as a double (triple, …) click
+const PULL = 6; // how far past the edge of its box the mouse goes before something is pulled out
 
 export function interactive() {
   const st = app.state;
@@ -30,8 +34,9 @@ function overUI(e) {
   return false;
 }
 
-// The page element under a point (skipping our own overlay), climbed to something we measured.
-export function pickElement(x, y) {
+// The page element under a point (skipping our own overlay), climbed to something we measured
+// at the current detail level (at "Sections", anything inside a section picks the section).
+export function pickElement(x, y, min = minLevel()) {
   let list;
   try {
     list = document.elementsFromPoint(x, y);
@@ -55,7 +60,8 @@ export function pickElement(x, y) {
   }
   let e = hit;
   while (e && !isRootish(e)) {
-    if (app.candByEl.has(e)) return e;
+    const c = app.candByEl.get(e);
+    if (c && c.lv >= min) return e;
     e = parentOf(e);
   }
   return null;
@@ -184,12 +190,12 @@ function setMouse(x, y, inside) {
   app.mouse.inside = inside;
 }
 
-// Ctrl/⌘ and Shift change what a click picks, so the hover shows that ahead of time.
+// Alt (Option on a Mac) and Shift change what a click picks, so the hover shows that ahead of time.
 function setMods(e) {
-  const mod = !!(e.metaKey || e.ctrlKey);
+  const alt = !!e.altKey;
   const shift = !!e.shiftKey;
-  if (app.mods.mod === mod && app.mods.shift === shift) return;
-  app.mods = { mod, shift };
+  if (app.mods.alt === alt && app.mods.shift === shift) return;
+  app.mods = { alt, shift };
   requestRender();
 }
 
@@ -206,7 +212,9 @@ function onDown(e) {
   const y = e.clientY;
   setMouse(x, y, true);
   const now = performance.now();
-  const dbl = now - lastUp.t < 400 && Math.hypot(x - lastUp.x, y - lastUp.y) < 12;
+  const dbl = now - lastUp.t < MULTI_MS && Math.hypot(x - lastUp.x, y - lastUp.y) < 12;
+  // double, triple, quadruple click: each extra click climbs one box further out
+  const count = dbl && lastUp.click ? lastUp.count + 1 : 1;
   let hot = findHot(x, y);
   if (hot && hot.type === 'chip' && e.shiftKey) hot = null; // Shift-click always means "add to selection"
   const item = !hot || hot.type === 'chip' ? itemAt(x, y) : null;
@@ -222,6 +230,7 @@ function onDown(e) {
     alt: e.altKey,
     mod: e.metaKey || e.ctrlKey,
     dbl,
+    count,
     pointerId: e.pointerId,
   };
   requestRender();
@@ -269,7 +278,7 @@ function onUp(e) {
   app.drag = null;
   if (d.type === 'pending') click(d);
   else endDrag(d);
-  lastUp = { t: performance.now(), x: e.clientX, y: e.clientY };
+  lastUp = { t: performance.now(), x: e.clientX, y: e.clientY, click: d.type === 'pending', count: d.count || 1 };
   app.snapLines = [];
   app.marquee = null;
   app.preview = null;
@@ -299,8 +308,17 @@ function startDrag(d) {
   if (d.shift || (d.dbl && !d.item)) return beginMarquee(d);
   if (d.item) {
     // Dragging from inside something that's already selected moves that (like a design tool),
-    // not the smaller thing that happens to be under the mouse.
-    const inside = d.item.kind === 'el' && liveSel().some((s) => s.kind === 'el' && s.el !== d.item.el && deepContains(s.el, d.item.el));
+    // not the smaller thing that happens to be under the mouse. The same goes for the box around
+    // it when the press lands inside the selected thing's outline but the page reports its
+    // container there (the gap between two lines of a link, a canvas that ignores the mouse).
+    const inside =
+      d.item.kind === 'el' &&
+      liveSel().some(
+        (s) =>
+          s.kind === 'el' &&
+          s.el !== d.item.el &&
+          (deepContains(s.el, d.item.el) || (deepContains(d.item.el, s.el) && containsPt(rectOf(s.el), d.sx, d.sy))),
+      );
     if (!isSelected(d.item) && !inside) setSelection([d.item]);
     if (d.alt && app.sel.every((s) => s.kind === 'shape')) {
       begin('Duplicate');
@@ -346,6 +364,7 @@ function endDrag(d) {
   } else if (d.type === 'move' || d.type === 'edge' || d.type === 'corner' || d.type === 'spacing') {
     commit();
   }
+  if (d.restructured) requestCollect();
   requestFull();
 }
 
@@ -356,6 +375,7 @@ export function cancelDrag() {
   if (d.live) app.live = Math.max(0, app.live - 1);
   if (d.type === 'move' || d.type === 'edge' || d.type === 'corner' || d.type === 'spacing') cancel();
   if (d.type === 'marquee') setSelection(d.base || []);
+  if (d.restructured) requestCollect();
   try {
     app.layer.releasePointerCapture(d.pointerId);
   } catch {}
@@ -441,12 +461,158 @@ function drawDrag(d) {
 
 function beginMove(d, inTx = false) {
   if (!inTx) begin('Move');
+  settleFlips(); // measure everything where it really is, not halfway through a slide
   const items = liveSel();
   d.type = 'move';
   d.items = items.map(startState);
   d.box0 = union(d.items.map((s) => s.rect));
   d.targets = buildTargets(items);
+  if (app.state.mode === 'change' && !app.state.canvasMode) for (const s of d.items) if (s.it.kind === 'el') findHome(d, s);
   goLive(d, items);
+}
+
+// ---- pulling things out of their box --------------------------------------------------------
+// Drag something past the edge of the box it sits in (a link out of a menu, a label out of a
+// button) and it comes out: it floats above everything, the box closes the gap behind it, and
+// dropping it back over the box puts it back.
+
+// The box something sits in: the nearest box around it that holds more than just it, has a look
+// of its own (a background, border or shadow), or cuts off whatever spills out of it.
+function homeOf(el) {
+  let p = parentOf(el);
+  for (let i = 0; p && !isRootish(p) && i < 40; i++, p = parentOf(p)) {
+    if (p === app.host) return null;
+    let cs;
+    try {
+      cs = getComputedStyle(p);
+    } catch {
+      return null;
+    }
+    if (cs.display === 'contents') continue;
+    if (cs.overflowX !== 'visible' || cs.overflowY !== 'visible' || (cs.clipPath && cs.clipPath !== 'none') || /paint|strict|content/.test(cs.contain || '')) return p;
+    if (hasPaint(cs)) return p;
+    if (thingsIn(p) >= 2) return p;
+  }
+  return null;
+}
+
+// How many visible things (elements or words) a box holds, stopping at 2.
+function thingsIn(p) {
+  let n = 0;
+  for (const k of p.childNodes) {
+    if (k.nodeType === 3) {
+      if (k.nodeValue && k.nodeValue.trim()) n++;
+    } else if (k.nodeType === 1 && k !== app.host) {
+      const r = k.getBoundingClientRect();
+      if (r.width >= 1 && r.height >= 1) n++;
+    }
+    if (n >= 2) return n;
+  }
+  return n;
+}
+
+// What actually comes out: the item itself, or the wrapper around it right inside its box (so a
+// link in a list item takes its list item along and the menu closes up completely).
+function liftOf(el, home) {
+  let t = el;
+  for (let p = parentOf(t); p && p !== home && !isRootish(p); p = parentOf(p)) t = p;
+  return t;
+}
+
+function findHome(d, s) {
+  const el = s.it.el;
+  const home = homeOf(el);
+  if (!home) return;
+  const lift = liftOf(el, home);
+  if (!isFree(lift) && !canPull(lift)) return;
+  s.home = home;
+  s.lift = lift;
+  // the spot that decides when it has left its box: the mouse for the thing you grabbed, and
+  // the matching spot on each other picked thing (so they don't all jump out at once)
+  const r = s.rect;
+  s.probe = { x: Math.min(Math.max(d.sx, r.x + 1), r.x + r.w - 1), y: Math.min(Math.max(d.sy, r.y + 1), r.y + r.h - 1) };
+  if (lift !== el && isFree(lift)) {
+    // it's riding in a wrapper that's already out: move the wrapper
+    touch(lift);
+    s.lop = beginOp(lift);
+    const er = rectOf(el);
+    const lr = rectOf(lift);
+    s.off = { x: er.x - lr.x, y: er.y - lr.y };
+  }
+  d.pull = true;
+}
+
+function markLifted(el, on) {
+  for (const c of app.cands) {
+    if (!deepContains(el, c.el)) continue;
+    c.top = on;
+    if (on) {
+      c.clip = null;
+      c.occ = null;
+      c.dynamic = true;
+    }
+  }
+}
+
+function pullCheck(d) {
+  const todo = [];
+  for (const s of d.items) {
+    if (!s.home || !s.home.isConnected) continue;
+    const x = s.probe.x + d.x - d.sx;
+    const y = s.probe.y + d.y - d.sy;
+    const H = rectOf(s.home);
+    const free = isFree(s.lift);
+    if (!free && (x < H.x - PULL || x > H.x + H.w + PULL || y < H.y - PULL || y > H.y + H.h + PULL)) todo.push([s, true]);
+    else if (free && x > H.x + 2 && x < H.x + H.w - 2 && y > H.y + 2 && y < H.y + H.h - 2) todo.push([s, false]);
+  }
+  if (!todo.length) return;
+  // the things left behind slide over to close the gap (or open it again), and something put
+  // back slides into its own spot
+  const watch = new Set();
+  for (const [s, out] of todo) {
+    for (const k of s.home.children) if (k !== s.lift && k !== app.host) watch.add(k);
+    if (!out) watch.add(s.lift);
+  }
+  const first = captureRects([...watch]);
+  let pulled = false;
+  for (const [s, out] of todo) {
+    const el = s.it.el;
+    const own = s.lift === el;
+    if (out) {
+      if (!own) {
+        // the item sits back in its own spot inside the wrapper that comes out with it
+        s.op.rec.tx = s.op.start.tx;
+        s.op.rec.ty = s.op.start.ty;
+        applyRec(s.op.rec);
+        if (!s.lop) {
+          touch(s.lift);
+          s.lop = beginOp(s.lift);
+        }
+      }
+      if (pullOut(own ? s.op : s.lop, s.home)) {
+        pulled = true;
+        s.back = false;
+        if (!own) {
+          const er = rectOf(el);
+          const lr = rectOf(s.lift);
+          s.off = { x: er.x - lr.x, y: er.y - lr.y };
+        }
+        markLifted(s.lift, true);
+      }
+    } else {
+      // back in its box: it waits in its own spot (drag out again and it comes along again)
+      putBack(own ? s.op : s.lop);
+      s.back = true;
+      markLifted(s.lift, false);
+    }
+  }
+  d.restructured = true;
+  flip(first, 280);
+  d.targets = buildTargets(liveSel());
+  if (pulled && !toldPull) {
+    toldPull = true;
+    hub.toast('Pulled it out of its box — the rest closed up · drop it back over the box to put it back', 3200);
+  }
 }
 
 function moveDrag(d) {
@@ -470,7 +636,16 @@ function moveDrag(d) {
     if (!lockY) dy += s.dy;
     lines = s.lines.filter((l) => (l.x1 === l.x2 ? !lockX : !lockY));
   }
-  for (const s of d.items) applyRect(s, { x: s.rect.x + dx, y: s.rect.y + dy, w: s.rect.w, h: s.rect.h }, false);
+  if (d.pull) pullCheck(d);
+  for (const s of d.items) {
+    if (s.back && !isFree(s.lift)) continue;
+    const r = { x: s.rect.x + dx, y: s.rect.y + dy, w: s.rect.w, h: s.rect.h };
+    // a wrapper that came out carries the item: put the wrapper where the item should be
+    if (s.lop && s.lift !== s.it.el && isFree(s.lift)) {
+      moveTo(s.lop, r.x - s.off.x, r.y - s.off.y);
+      requestFull();
+    } else applyRect(s, r, false);
+  }
   app.snapLines = lines;
 }
 
@@ -624,8 +799,9 @@ function marqueeDrag(d) {
   for (const s of activeShapes()) if (overlaps(shapeRect(s), m)) found.push(shapeItem(s));
   if (app.state.mode === 'change' && !app.state.canvasMode && m.w > 2 && m.h > 2) {
     const inside = new Set();
+    const L = minLevel();
     for (const c of app.cands) {
-      if (c.dup || c.w < 2 || c.h < 2) continue;
+      if (c.dup || c.w < 2 || c.h < 2 || c.lv < L) continue;
       if (containsRect(m, c)) inside.add(c);
     }
     for (const c of inside) {
@@ -672,22 +848,27 @@ function click(d) {
     setSelection([shapeItem(s)]);
     return;
   }
-  if (d.mod && it.kind === 'el') return modClick(it, d.shift);
+  if (it.kind === 'el') {
+    // Alt+Shift-click: everything like it. Alt-click, or clicking again quickly (double, triple,
+    // quadruple click): the box around it, one level further out each time.
+    if (d.alt && d.shift) return pickAlike(it);
+    if (d.alt || (d.count >= 2 && !d.shift)) return climb(it);
+  }
   if (d.shift) return toggleSelected(it);
   setSelection([it]);
 }
 
-function modClick(it, shift) {
-  if (shift) {
-    const base = alikeBase(it.el);
-    const list = alikeOf(base);
-    setSelection(list.map(elItem));
-    hub.toast(
-      list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
-      2600,
-    );
-    return;
-  }
+function pickAlike(it) {
+  const base = alikeBase(it.el);
+  const list = alikeOf(base);
+  setSelection(list.map(elItem));
+  hub.toast(
+    list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
+    2600,
+  );
+}
+
+function climb(it) {
   const sel = liveSel().filter((s) => s.kind === 'el');
   const inside = sel.filter((s) => deepContains(s.el, it.el));
   if (!inside.length) {
@@ -695,7 +876,8 @@ function modClick(it, shift) {
     return;
   }
   // one level up: the picked thing becomes the box around it (all of them, if several are picked)
-  const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el) || s.el);
+  const L = minLevel();
+  const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el, L) || s.el);
   const uniq = [];
   for (const el of up) if (!uniq.includes(el)) uniq.push(el);
   const outer = uniq.filter((el) => !uniq.some((o) => o !== el && deepContains(o, el)));
@@ -712,7 +894,7 @@ function onContext(e) {
   if (!interactive()) return;
   e.preventDefault();
   e.stopPropagation();
-  // On a Mac, Control-click also opens the menu: here it means "pick the box around it".
+  // On a Mac, Control-click opens the menu too: treat it as a plain click, never as "remove box".
   if (e.ctrlKey && e.button === 0) return;
   const s = shapeAt(e.clientX, e.clientY, 2);
   if (!s) return;
@@ -863,8 +1045,11 @@ function onKey(e) {
   const hasSel = editing && app.sel.length > 0;
   const d = app.drag;
   setMods(e);
+  // Alt on its own would jump to the browser's menu on Windows; here it means "the box around it"
+  if (k === 'Alt' && st.mode === 'change' && !st.canvasMode) e.preventDefault();
   if (d && (k === 'Shift' || k === 'Meta' || k === 'Control' || k === 'Alt')) {
     d.shift = e.shiftKey;
+    d.alt = e.altKey;
     d.mod = e.metaKey || e.ctrlKey;
     if (d.type !== 'pending') dragMove(d);
     requestRender();
@@ -912,6 +1097,9 @@ function onKey(e) {
     } else if (lower === 'h') {
       handled = true;
       hub.toggleGuides();
+    } else if (lower === 'l') {
+      handled = true;
+      hub.cycleDetail(e.shiftKey ? -1 : 1);
     }
   }
   if (handled) {
@@ -924,9 +1112,11 @@ function onKey(e) {
 
 function onKeyUp(e) {
   setMods(e);
+  if (e.key === 'Alt' && app.state.open && app.state.mode === 'change' && !app.state.canvasMode) e.preventDefault();
   const d = app.drag;
   if (!d) return;
   d.shift = e.shiftKey;
+  d.alt = e.altKey;
   d.mod = e.metaKey || e.ctrlKey;
   if (d.type !== 'pending') dragMove(d);
   requestRender();
@@ -942,7 +1132,7 @@ function onOut(e) {
 }
 
 function onBlur() {
-  app.mods = { mod: false, shift: false };
+  app.mods = { alt: false, shift: false };
   if (app.drag && app.drag.type !== 'pending') {
     const d = app.drag;
     app.drag = null;

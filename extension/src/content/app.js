@@ -27,6 +27,7 @@ export const app = {
     unit: 'vw/vh',
     fill: 0.08,
     guides: true,
+    detail: 'all', // how much is measured: 'all' | 'blocks' | 'sections'
     mode: 'measure', // 'measure' | 'draw' | 'change'
     canvasMode: false,
     capturing: false,
@@ -57,7 +58,7 @@ export const app = {
   snapLines: [],
   arrows: [],
   crowded: false,
-  mods: { mod: false, shift: false }, // Ctrl/⌘ and Shift, for the click previews
+  mods: { alt: false, shift: false }, // Alt (Option) and Shift, for the click previews
   chips: [],
   spacing: null,
   pulses: [],
@@ -72,6 +73,14 @@ export const app = {
   raf: 0,
   frame: 0,
 };
+
+// Detail levels: everything, just the blocks (no loose words or small icons), or just the big
+// sections of the page. Boxes below the chosen level aren't drawn or picked.
+export const DETAILS = ['all', 'blocks', 'sections'];
+export function minLevel() {
+  const d = app.state.detail;
+  return d === 'sections' ? 2 : d === 'blocks' ? 1 : 0;
+}
 
 export function requestRender() {
   app.dirty = true;

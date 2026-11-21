@@ -24,6 +24,8 @@
       unit: "vw/vh",
       fill: 0.08,
       guides: true,
+      detail: "all",
+      // how much is measured: 'all' | 'blocks' | 'sections'
       mode: "measure",
       // 'measure' | 'draw' | 'change'
       canvasMode: false,
@@ -56,8 +58,8 @@
     snapLines: [],
     arrows: [],
     crowded: false,
-    mods: { mod: false, shift: false },
-    // Ctrl/⌘ and Shift, for the click previews
+    mods: { alt: false, shift: false },
+    // Alt (Option) and Shift, for the click previews
     chips: [],
     spacing: null,
     pulses: [],
@@ -71,6 +73,11 @@
     raf: 0,
     frame: 0
   };
+  var DETAILS = ["all", "blocks", "sections"];
+  function minLevel() {
+    const d = app.state.detail;
+    return d === "sections" ? 2 : d === "blocks" ? 1 : 0;
+  }
   function requestRender() {
     app.dirty = true;
   }
@@ -111,6 +118,7 @@
     close: noop,
     cycleUnit: noop,
     toggleGuides: noop,
+    cycleDetail: noop,
     group: noop,
     ungroup: noop,
     cancelDrag: noop,
@@ -189,12 +197,33 @@
     const root = el.getRootNode ? el.getRootNode() : null;
     return root && root.host ? root.host : null;
   }
-  function parentPick(el) {
+  var flips = /* @__PURE__ */ new Set();
+  function settleFlips() {
+    for (const a of flips) {
+      try {
+        a.finish();
+      } catch {
+      }
+    }
+    flips.clear();
+  }
+  function dropStyle(el) {
+    el.getAttribute("style");
+    el.removeAttribute("style");
+  }
+  function unsetStyle(el, prop, hadStyle) {
+    el.style.removeProperty(prop);
+    if (!hadStyle && !el.style.length) dropStyle(el);
+  }
+  function parentPick(el, min = 0) {
     const r = rectOf(el);
     let p = parentOf(el);
     while (p && !isRootish(p)) {
       const pr = rectOf(p);
-      if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
+      if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) {
+        const c = min ? app.candByEl.get(p) : null;
+        if (!c || c.dup || c.lv >= min) return p;
+      }
       p = parentOf(p);
     }
     return null;
@@ -310,9 +339,494 @@
     }
     return parts.join(" > ");
   }
+  function alphaOf(c) {
+    if (!c || c === "transparent") return 0;
+    let m = /\/\s*([\d.]+)(%?)\s*\)\s*$/.exec(c);
+    if (m) return parseFloat(m[1]) * (m[2] ? 0.01 : 1);
+    m = /^rgba\(([^)]+)\)/.exec(c);
+    if (m) {
+      const parts = m[1].split(/[\s,]+/).filter(Boolean);
+      if (parts.length >= 4) return parseFloat(parts[3]) * (parts[3].endsWith("%") ? 0.01 : 1);
+    }
+    return 1;
+  }
+  var SIDES = ["Top", "Right", "Bottom", "Left"];
+  function hasPaint(cs) {
+    if (cs.backgroundImage && cs.backgroundImage !== "none") return true;
+    if (alphaOf(cs.backgroundColor) > 0.05) return true;
+    if (cs.boxShadow && cs.boxShadow !== "none") return true;
+    for (const s of SIDES) {
+      const st = cs["border" + s + "Style"];
+      if (st !== "none" && st !== "hidden" && parseFloat(cs["border" + s + "Width"]) > 0 && alphaOf(cs["border" + s + "Color"]) > 0.05) return true;
+    }
+    return false;
+  }
   function cssPx(v) {
     const n = parseFloat(v);
     return Number.isFinite(n) ? n : 0;
+  }
+
+  // src/content/edits.js
+  var recs = /* @__PURE__ */ new Map();
+  var seq = 0;
+  var IMP = "important";
+  var r2 = (n) => Math.round(n * 100) / 100;
+  function nextFlowSibling(el) {
+    let n = el.nextElementSibling;
+    while (n) {
+      if (n !== app.host) {
+        try {
+          const cs = getComputedStyle(n);
+          if (cs.display !== "none" && cs.position !== "absolute" && cs.position !== "fixed") return n;
+        } catch {
+        }
+      }
+      n = n.nextElementSibling;
+    }
+    return null;
+  }
+  function getRec(el) {
+    return recs.get(el) || null;
+  }
+  function ensureRec(el) {
+    let rec = recs.get(el);
+    if (rec) return rec;
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const parent = el.parentElement;
+    const pcs = parent ? getComputedStyle(parent) : null;
+    const display = cs.display;
+    const position = cs.position;
+    const pDisplay = pcs ? pcs.display : "block";
+    const outOfFlow = position === "absolute" || position === "fixed";
+    const tablePart = /^table-(cell|row|row-group|header-group|footer-group|column|column-group|caption)$/.test(display);
+    const parentFlexGrid = /flex|grid/.test(pDisplay);
+    rec = {
+      el,
+      id: ++seq,
+      origStyle: el.getAttribute("style"),
+      origParent: el.parentNode,
+      origNext: el.nextSibling,
+      orig: { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height },
+      o: {
+        display,
+        position,
+        translate: cs.translate,
+        left: cs.left,
+        top: cs.top,
+        mr: cssPx(cs.marginRight),
+        mb: cssPx(cs.marginBottom),
+        flexDirection: cs.flexDirection,
+        flexWrap: cs.flexWrap,
+        justifyContent: cs.justifyContent,
+        alignItems: cs.alignItems,
+        gap: cs.columnGap,
+        rowGap: cs.rowGap,
+        pDisplay
+      },
+      inFlow: !outOfFlow && !tablePart,
+      flexItem: parentFlexGrid && !outOfFlow,
+      inline: display === "inline",
+      blockFlow: !parentFlexGrid && !display.startsWith("inline") && cs.float === "none" && !outOfFlow,
+      tx: 0,
+      ty: 0,
+      w: null,
+      h: null,
+      mr: null,
+      mb: null,
+      deleted: false,
+      collapsed: false,
+      css: {},
+      free: null,
+      // pulled out: { left, top } in page px
+      fw: null,
+      // its own size while pulled out (unless you resized it)
+      fh: null,
+      freeCss: null,
+      // how it looked, kept while it's lifted out
+      home: null,
+      // the box it was pulled out of
+      created: false,
+      name: describe(el),
+      selector: selectorFor(el)
+    };
+    recs.set(el, rec);
+    return rec;
+  }
+  function markCreated(el) {
+    const rec = ensureRec(el);
+    rec.created = true;
+    rec.origStyle = null;
+    rec.origParent = null;
+    rec.origNext = null;
+    return rec;
+  }
+  function composeTranslate(base, tx, ty) {
+    const x = r2(tx);
+    const y = r2(ty);
+    if (!base || base === "none") return `${x}px ${y}px`;
+    const parts = base.trim().split(/\s+/);
+    const bx = parts[0] || "0px";
+    const by = parts[1] || "0px";
+    const bz = parts[2];
+    return `calc(${bx} + ${x}px) calc(${by} + ${y}px)${bz ? " " + bz : ""}`;
+  }
+  function applyRec(rec) {
+    const el = rec.el;
+    if (rec.origStyle == null) dropStyle(el);
+    else el.style.cssText = rec.origStyle;
+    const s = el.style;
+    const set = (p, v) => s.setProperty(p, v, IMP);
+    const moved = Math.abs(rec.tx) > 4e-3 || Math.abs(rec.ty) > 4e-3;
+    const sized = rec.w != null || rec.h != null;
+    if (rec.free) applyFree(rec, set);
+    else {
+      if (moved) {
+        if (rec.inline && !sized && (rec.o.position === "static" || rec.o.position === "relative")) {
+          const base = (v) => rec.o.position === "relative" && /px$/.test(v || "") ? parseFloat(v) : 0;
+          set("position", "relative");
+          set("left", r2(base(rec.o.left) + rec.tx) + "px");
+          set("top", r2(base(rec.o.top) + rec.ty) + "px");
+        } else {
+          if (rec.inline) set("display", "inline-block");
+          set("translate", composeTranslate(rec.o.translate, rec.tx, rec.ty));
+        }
+      }
+      if (sized) {
+        set("box-sizing", "border-box");
+        if (rec.inline) set("display", "inline-block");
+        if (rec.flexItem) {
+          set("flex-grow", "0");
+          set("flex-shrink", "0");
+          set("flex-basis", "auto");
+        }
+      }
+      if (rec.w != null) {
+        set("width", r2(rec.w) + "px");
+        set("min-width", "0px");
+        set("max-width", "none");
+      }
+      if (rec.h != null) {
+        set("height", r2(rec.h) + "px");
+        set("min-height", "0px");
+        set("max-height", "none");
+      }
+      if (rec.mr != null) set("margin-right", r2(rec.mr) + "px");
+      if (rec.mb != null) set("margin-bottom", r2(rec.mb) + "px");
+    }
+    if (moved || sized || rec.free) set("transition", "none");
+    for (const p in rec.css) set(p, rec.css[p]);
+    if (rec.deleted && !rec.collapsed) {
+      set("visibility", "hidden");
+      set("pointer-events", "none");
+    }
+    if (rec.collapsed) set("display", "none");
+    syncPop(el, rec);
+  }
+  var px4 = (n) => +n.toFixed(4) + "px";
+  var ourPop = /* @__PURE__ */ new WeakSet();
+  var NO_PULL = /* @__PURE__ */ new Set(["HTML", "BODY", "DIALOG", "OPTION", "OPTGROUP", "TD", "TH", "TR", "THEAD", "TBODY", "TFOOT", "COL", "COLGROUP", "CAPTION", "AREA", "SUMMARY", "LEGEND"]);
+  var FREEZE = [
+    "color",
+    "background-color",
+    "border-top-width",
+    "border-right-width",
+    "border-bottom-width",
+    "border-left-width",
+    "border-top-style",
+    "border-right-style",
+    "border-bottom-style",
+    "border-left-style",
+    "border-top-color",
+    "border-right-color",
+    "border-bottom-color",
+    "border-left-color",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "overflow-x",
+    "overflow-y"
+  ];
+  function applyFree(rec, set) {
+    set("position", "absolute");
+    set("left", r2(rec.free.left) + "px");
+    set("top", r2(rec.free.top) + "px");
+    set("right", "auto");
+    set("bottom", "auto");
+    set("margin", "0px");
+    set("float", "none");
+    set("box-sizing", "border-box");
+    const w = rec.w != null ? rec.w : rec.fw;
+    const h = rec.h != null ? rec.h : rec.fh;
+    if (w != null) {
+      set("width", rec.w != null ? r2(w) + "px" : px4(w));
+      set("min-width", "0px");
+      set("max-width", "none");
+    }
+    if (h != null) {
+      set("height", rec.h != null ? r2(h) + "px" : px4(h));
+      set("min-height", "0px");
+      set("max-height", "none");
+    }
+    for (const p in rec.freeCss || {}) set(p, rec.freeCss[p]);
+  }
+  function popOpen(el) {
+    try {
+      return el.matches(":popover-open");
+    } catch {
+      return false;
+    }
+  }
+  function syncPop(el, rec) {
+    if (rec && rec.free) {
+      if (!el.isConnected) return;
+      if (!el.hasAttribute("popover")) {
+        el.setAttribute("popover", "manual");
+        ourPop.add(el);
+      }
+      if (!popOpen(el)) {
+        try {
+          el.showPopover();
+        } catch {
+        }
+        raiseHost();
+      }
+    } else if (ourPop.has(el)) {
+      if (popOpen(el)) {
+        try {
+          el.hidePopover();
+        } catch {
+        }
+      }
+      el.removeAttribute("popover");
+      ourPop.delete(el);
+    }
+  }
+  function raiseHost() {
+    const h = app.host;
+    if (!h || !h.isConnected || typeof h.showPopover !== "function") return;
+    try {
+      if (!h.hasAttribute("popover")) h.setAttribute("popover", "manual");
+      if (popOpen(h)) h.hidePopover();
+      h.showPopover();
+    } catch {
+    }
+  }
+  function hasFree() {
+    for (const r of recs.values()) if (r.free && r.el.isConnected) return true;
+    return false;
+  }
+  function isFree(el) {
+    const r = recs.get(el);
+    return !!(r && r.free);
+  }
+  function freeEls() {
+    return [...recs.values()].filter((r) => r.free && r.el.isConnected).map((r) => r.el);
+  }
+  function canPull(el) {
+    if (!el || !el.isConnected || typeof el.showPopover !== "function" || !(el instanceof HTMLElement)) return false;
+    if (NO_PULL.has(el.tagName)) return false;
+    if (el.hasAttribute("popover") && !ourPop.has(el)) return false;
+    let cs;
+    try {
+      cs = getComputedStyle(el);
+    } catch {
+      return false;
+    }
+    return !/^(table-|none$|contents$)/.test(cs.display);
+  }
+  function pullOut(op, home) {
+    const { rec, el } = op;
+    if (rec.free) return true;
+    if (!canPull(el)) return false;
+    settleFlips();
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const flat = cs.transform === "none" && (cs.rotate || "none") === "none" && (cs.scale || "none") === "none";
+    const freeze = {};
+    for (const p of FREEZE) freeze[p] = cs.getPropertyValue(p);
+    rec.fw = flat ? r.width : el.offsetWidth;
+    rec.fh = flat ? r.height : el.offsetHeight;
+    if (cs.display === "inline") {
+      if (el.getClientRects().length <= 1) {
+        const pad = cssPx(cs.paddingTop) + cssPx(cs.paddingBottom) + cssPx(cs.borderTopWidth) + cssPx(cs.borderBottomWidth);
+        freeze["line-height"] = Math.max(1, rec.fh - pad) + "px";
+        freeze["white-space"] = "nowrap";
+      } else rec.fh = null;
+    }
+    rec.freeCss = freeze;
+    rec.home = home || el.parentElement;
+    rec.free = { left: r.left + window.scrollX, top: r.top + window.scrollY };
+    applyRec(rec);
+    const now = el.getBoundingClientRect();
+    rec.free = { left: rec.free.left + (r.left - now.left), top: rec.free.top + (r.top - now.top) };
+    applyRec(rec);
+    if (!popOpen(el)) {
+      rec.free = null;
+      applyRec(rec);
+      return false;
+    }
+    op.base = { free: true, left: rec.free.left, top: rec.free.top, x: r.left, y: r.top };
+    requestFull();
+    return true;
+  }
+  function putBack(op) {
+    const { rec, el } = op;
+    if (!rec.free) return;
+    rec.free = null;
+    rec.tx = 0;
+    rec.ty = 0;
+    applyRec(rec);
+    const r = rectOf(el);
+    op.base = { free: false, tx: 0, ty: 0, x: r.x, y: r.y };
+    requestFull();
+  }
+  function beginOp(el) {
+    const rec = ensureRec(el);
+    const rect = rectOf(el);
+    const next = rec.inFlow && !rec.free ? nextFlowSibling(el) : null;
+    const parent = el.parentElement;
+    return {
+      el,
+      rec,
+      // what moves are measured from: its translate in the page flow, or its spot when pulled out
+      base: rec.free ? { free: true, left: rec.free.left, top: rec.free.top, x: rect.x, y: rect.y } : { free: false, tx: rec.tx, ty: rec.ty, x: rect.x, y: rect.y },
+      start: { rect, tx: rec.tx, ty: rec.ty, w: rec.w, h: rec.h, mr: rec.mr, mb: rec.mb },
+      next,
+      next0: next ? rectOf(next) : null,
+      parent,
+      parent0: parent ? rectOf(parent) : null
+    };
+  }
+  function moveTo(op, x, y) {
+    const { rec } = op;
+    const b = op.base;
+    if (rec.free && b.free) {
+      rec.free = { left: b.left + (x - b.x), top: b.top + (y - b.y) };
+    } else {
+      rec.tx = b.tx + (x - b.x);
+      rec.ty = b.ty + (y - b.y);
+    }
+    applyRec(rec);
+  }
+  function residual(op) {
+    const { next, next0, parent, parent0, start } = op;
+    const ex = start.rect.x - start.tx;
+    const ey = start.rect.y - start.ty;
+    const er = { x: ex, y: ey, w: start.rect.w, h: start.rect.h };
+    let rx = 0;
+    let ry = 0;
+    const p = parent && parent0 ? rectOf(parent) : null;
+    if (next && next0 && next.isConnected) {
+      const n = rectOf(next);
+      const sameRow = next0.y < er.y + er.h - 1 && next0.x >= er.x + er.w - 1.5;
+      if (sameRow) {
+        rx = n.x - next0.x;
+        if (p) ry = p.h - parent0.h;
+      } else {
+        ry = n.y - next0.y;
+        if (p) rx = p.w - parent0.w;
+      }
+    } else if (p) {
+      rx = p.w - parent0.w;
+      ry = p.h - parent0.h;
+    }
+    return { rx, ry };
+  }
+  function resizeTo(op, t) {
+    const { rec, el, start } = op;
+    const changeW = Math.abs(t.w - start.rect.w) > 0.05;
+    const changeH = Math.abs(t.h - start.rect.h) > 0.05;
+    rec.w = changeW ? Math.max(1, t.w) : start.w;
+    rec.h = changeH ? Math.max(1, t.h) : start.h;
+    if (rec.free) {
+      applyRec(rec);
+      const now2 = rectOf(el);
+      rec.free = { left: rec.free.left + (t.x - now2.x), top: rec.free.top + (t.y - now2.y) };
+      applyRec(rec);
+      requestFull();
+      return;
+    }
+    if (rec.inFlow) {
+      const dW = (changeW ? rec.w : start.rect.w) - start.rect.w;
+      const dH = (changeH ? rec.h : start.rect.h) - start.rect.h;
+      const baseMr = start.mr != null ? start.mr : rec.o.mr;
+      const baseMb = start.mb != null ? start.mb : rec.o.mb;
+      rec.mr = changeW && !rec.blockFlow ? baseMr - dW : start.mr;
+      rec.mb = changeH ? baseMb - dH : start.mb;
+      applyRec(rec);
+      for (let i = 0; i < 3; i++) {
+        const { rx, ry } = residual(op);
+        if (Math.abs(rx) < 0.4 && Math.abs(ry) < 0.4) break;
+        if (Math.abs(rx) >= 0.4) rec.mr = (rec.mr != null ? rec.mr : rec.o.mr) - rx;
+        if (Math.abs(ry) >= 0.4) rec.mb = (rec.mb != null ? rec.mb : rec.o.mb) - ry;
+        applyRec(rec);
+      }
+    } else {
+      applyRec(rec);
+    }
+    const now = rectOf(el);
+    rec.tx += t.x - now.x;
+    rec.ty += t.y - now.y;
+    applyRec(rec);
+    requestFull();
+  }
+  function setDeleted(el, on) {
+    const rec = ensureRec(el);
+    rec.deleted = on;
+    applyRec(rec);
+    requestFull();
+  }
+  function setCss(el, props) {
+    const rec = ensureRec(el);
+    for (const p in props) {
+      if (props[p] == null) delete rec.css[p];
+      else rec.css[p] = props[p];
+    }
+    applyRec(rec);
+    requestFull();
+  }
+  function isEdited(rec) {
+    return rec.created || Math.abs(rec.tx) > 0.5 || Math.abs(rec.ty) > 0.5 || rec.w != null || rec.h != null || rec.deleted || rec.collapsed || !!rec.free || Object.keys(rec.css).length > 0 || rec.el.parentNode !== rec.origParent;
+  }
+  function cloneRec(rec) {
+    return { ...rec, css: { ...rec.css }, free: rec.free ? { ...rec.free } : null };
+  }
+  function snapshot(el) {
+    const rec = recs.get(el);
+    return {
+      style: el.getAttribute("style"),
+      parent: el.parentNode,
+      next: el.nextSibling,
+      rec: rec ? cloneRec(rec) : null
+    };
+  }
+  function sameSnapshot(a, b) {
+    if (a.style !== b.style || a.parent !== b.parent || a.next !== b.next) return false;
+    const ra = a.rec;
+    const rb = b.rec;
+    if (!ra || !rb) return !ra && !rb;
+    return ra.tx === rb.tx && ra.ty === rb.ty && ra.w === rb.w && ra.h === rb.h && ra.mr === rb.mr && ra.mb === rb.mb && ra.deleted === rb.deleted && ra.collapsed === rb.collapsed && JSON.stringify(ra.css) === JSON.stringify(rb.css) && JSON.stringify(ra.free) === JSON.stringify(rb.free) && ra.fw === rb.fw && ra.fh === rb.fh;
+  }
+  function restoreDom(el, snap2) {
+    if (!snap2.parent) {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      return;
+    }
+    if (el.parentNode === snap2.parent && el.nextSibling === snap2.next) return;
+    if (snap2.next && snap2.next.parentNode === snap2.parent) snap2.parent.insertBefore(el, snap2.next);
+    else snap2.parent.appendChild(el);
+  }
+  function restoreState(el, snap2) {
+    if (snap2.style == null) dropStyle(el);
+    else el.style.cssText = snap2.style;
+    if (snap2.rec) recs.set(el, cloneRec(snap2.rec));
+    else recs.delete(el);
+    syncPop(el, snap2.rec);
+  }
+  function allRecs() {
+    return [...recs.values()].sort((a, b) => a.id - b.id);
   }
 
   // src/content/collect.js
@@ -339,6 +853,8 @@
   ]);
   var LEAF = /* @__PURE__ */ new Set(["svg", "SVG", "IFRAME", "VIDEO", "AUDIO", "CANVAS", "IMG", "PICTURE", "INPUT", "TEXTAREA", "SELECT", "OBJECT", "EMBED", "math", "MATH"]);
   var MAX = 5e3;
+  var MEDIA = /* @__PURE__ */ new Set(["svg", "SVG", "IFRAME", "VIDEO", "AUDIO", "CANVAS", "IMG", "PICTURE", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "OBJECT", "EMBED", "math", "MATH"]);
+  var ICONISH = /* @__PURE__ */ new Set(["svg", "SVG", "IMG", "PICTURE", "CANVAS", "math", "MATH"]);
   function childrenOf(el) {
     if (el.shadowRoot) return el.shadowRoot.children;
     if (el.tagName === "SLOT" && el.assignedElements) {
@@ -464,7 +980,8 @@
       const isRoot = el === document.documentElement || el === document.body;
       const r = el.getBoundingClientRect();
       const pos = cs.position;
-      const fixed = pos === "fixed";
+      const lifted = ctx.top || isFree(el);
+      const fixed = pos === "fixed" || lifted && !ctx.top;
       const dynamic = ctx.dynamic || fixed || pos === "sticky";
       if (band && !isRoot && !dynamic) {
         const top = r.top + sy;
@@ -510,18 +1027,28 @@
           gapY: cssPx(cs.rowGap),
           text: hasOwnText(el),
           textR: null,
-          occ: ctx.occ || null,
+          occ: lifted ? null : ctx.occ || null,
           isOcc: false,
-          at: 0
+          top: lifted,
+          at: 0,
+          // detail levels: 0 = words and little icons, 1 = blocks, 2 = the page's big sections
+          lv: 0,
+          boxKids: 0,
+          paint: hasPaint(cs),
+          media: MEDIA.has(tag),
+          inl: display === "inline"
         };
         if (cand.text && texts++ < 2500) cand.textR = textBox(el, r);
-        if ((fixed || pos === "sticky" || ctx.inFixed) && !ctx.occ && r.width >= 8 && r.height >= 8 && opaqueBg(cs)) {
+        if ((fixed || pos === "sticky" || ctx.inFixed) && !lifted && !ctx.occ && r.width >= 8 && r.height >= 8 && opaqueBg(cs)) {
           cand.isOcc = true;
           occluders.push(cand);
         }
         out.push(cand);
       }
-      if (LEAF.has(tag)) return;
+      if (LEAF.has(tag)) {
+        if (cand) settle(cand, ctx);
+        return;
+      }
       let nclip = clip;
       let childDynamic = dynamic;
       const ox = cs.overflowX;
@@ -549,18 +1076,28 @@
         nclip = k;
         if (scrollish && (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)) childDynamic = true;
       }
+      if (lifted) childDynamic = true;
       const nctx = {
         cand: cand ? cand.dup ? cand.parent : cand : ctx.cand,
+        up: cand || ctx.up,
         dynamic: childDynamic,
         clip: nclip,
-        occ: cand && cand.isOcc ? cand : ctx.occ,
-        inFixed: ctx.inFixed || fixed || pos === "sticky"
+        occ: cand && cand.isOcc ? cand : lifted ? null : ctx.occ,
+        inFixed: (ctx.inFixed || fixed || pos === "sticky") && !lifted,
+        top: lifted
       };
       for (const k of childrenOf(el)) visit(k, nctx);
+      if (cand) settle(cand, ctx);
+    };
+    const settle = (c, ctx) => {
+      const words = !c.paint && !c.media && c.boxKids === 0 && (c.text || c.inl);
+      const icon = ICONISH.has(c.el.tagName) && !c.paint && c.w <= 28 && c.h <= 28;
+      c.lv = words || icon ? 0 : 1;
+      if (c.lv && ctx.up) ctx.up.boxKids++;
     };
     const start = document.documentElement;
     if (start) {
-      for (const k of start.children) visit(k, { cand: null, dynamic: false, clip: null, occ: null, inFixed: false });
+      for (const k of start.children) visit(k, { cand: null, up: null, dynamic: false, clip: null, occ: null, inFixed: false, top: false });
     }
     const behind = /* @__PURE__ */ new Set();
     for (const o of occluders) if (!inFront(o)) behind.add(o);
@@ -568,6 +1105,7 @@
       for (const o of behind) o.isOcc = false;
       for (const c of out) if (c.occ && behind.has(c.occ)) c.occ = null;
     }
+    markSections(out, band);
     const now = performance.now();
     const fresh = out.filter((c) => !app.revealed.has(c.el));
     if (fresh.length && (app.state.capturing || app.reduceMotion)) {
@@ -594,6 +1132,73 @@
     app.lastCollect = performance.now();
     app.collectMs = app.lastCollect - t0;
     return out;
+  }
+  var SPLIT_MIN = 0.3;
+  function markSections(out, band) {
+    const de = document.documentElement;
+    const sy = window.scrollY;
+    const y1 = band ? band.top : -Infinity;
+    const y2 = band ? band.bottom : Infinity;
+    const pageW = Math.max(app.vw, de.scrollWidth || 0);
+    const pageH = band ? band.bottom - band.top : Math.max(app.vh, de.scrollHeight || 0);
+    const pageArea = pageW * pageH;
+    const span = (c) => {
+      const a = Math.max(c.y + sy, y1);
+      const b = Math.min(c.y + sy + c.h, y2);
+      return [a, b];
+    };
+    const area = (c) => {
+      const [a, b] = span(c);
+      return Math.max(0, b - a) * c.w;
+    };
+    const overlap = (k, n) => {
+      const [ka, kb] = span(k);
+      const [na, nb] = span(n);
+      const w = Math.min(k.x + k.w, n.x + n.w) - Math.max(k.x, n.x);
+      const h = Math.min(kb, nb) - Math.max(ka, na);
+      return w > 0 && h > 0 ? w * h : 0;
+    };
+    const kids = /* @__PURE__ */ new Map();
+    const roots = [];
+    for (const c of out) {
+      if (c.dup || c.lv < 1) continue;
+      if (c.parent) {
+        let l = kids.get(c.parent);
+        if (!l) kids.set(c.parent, l = []);
+        l.push(c);
+      } else roots.push(c);
+    }
+    const split2 = (n, depth) => {
+      if (depth > 10) return null;
+      const A = area(n);
+      if (A < SPLIT_MIN * pageArea) return null;
+      const ks = (kids.get(n) || []).filter((k) => area(k) > 0);
+      if (!ks.length) return null;
+      if (ks.length === 1) return overlap(ks[0], n) >= (n.paint ? 0.85 : 0.5) * A ? split2(ks[0], depth + 1) : null;
+      let cover = 0;
+      let regions = 0;
+      let regionArea = 0;
+      let thin = 0;
+      for (const k of ks) {
+        const a = overlap(k, n);
+        cover += a;
+        const row = k.w >= 0.8 * n.w;
+        if (row || k.h >= 0.8 * n.h) {
+          regions++;
+          regionArea += a;
+          if (row ? k.h < 0.25 * app.vh : k.w < 0.25 * app.vw) thin++;
+        }
+      }
+      if (regions >= 8 && thin === regions) return null;
+      return regions >= 2 && cover >= 0.5 * A && regionArea >= 0.7 * cover ? ks : null;
+    };
+    const queue = roots.slice();
+    for (let i = 0; i < queue.length && i < 3e3; i++) {
+      const c = queue[i];
+      const parts = split2(c, 0);
+      if (parts) queue.push(...parts);
+      else c.lv = 2;
+    }
   }
   function measure(full) {
     const sx = window.scrollX;
@@ -851,280 +1456,6 @@
   function duplicateShape(s, dx = 16, dy = 16) {
     const r = shapeRect(s);
     return createShape({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h }, s.space);
-  }
-
-  // src/content/edits.js
-  var recs = /* @__PURE__ */ new Map();
-  var seq = 0;
-  var IMP = "important";
-  var r2 = (n) => Math.round(n * 100) / 100;
-  function nextFlowSibling(el) {
-    let n = el.nextElementSibling;
-    while (n) {
-      if (n !== app.host) {
-        try {
-          const cs = getComputedStyle(n);
-          if (cs.display !== "none" && cs.position !== "absolute" && cs.position !== "fixed") return n;
-        } catch {
-        }
-      }
-      n = n.nextElementSibling;
-    }
-    return null;
-  }
-  function getRec(el) {
-    return recs.get(el) || null;
-  }
-  function ensureRec(el) {
-    let rec = recs.get(el);
-    if (rec) return rec;
-    const cs = getComputedStyle(el);
-    const r = el.getBoundingClientRect();
-    const parent = el.parentElement;
-    const pcs = parent ? getComputedStyle(parent) : null;
-    const display = cs.display;
-    const position = cs.position;
-    const pDisplay = pcs ? pcs.display : "block";
-    const outOfFlow = position === "absolute" || position === "fixed";
-    const tablePart = /^table-(cell|row|row-group|header-group|footer-group|column|column-group|caption)$/.test(display);
-    const parentFlexGrid = /flex|grid/.test(pDisplay);
-    rec = {
-      el,
-      id: ++seq,
-      origStyle: el.getAttribute("style"),
-      origParent: el.parentNode,
-      origNext: el.nextSibling,
-      orig: { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height },
-      o: {
-        display,
-        position,
-        translate: cs.translate,
-        left: cs.left,
-        top: cs.top,
-        mr: cssPx(cs.marginRight),
-        mb: cssPx(cs.marginBottom),
-        flexDirection: cs.flexDirection,
-        flexWrap: cs.flexWrap,
-        justifyContent: cs.justifyContent,
-        alignItems: cs.alignItems,
-        gap: cs.columnGap,
-        rowGap: cs.rowGap,
-        pDisplay
-      },
-      inFlow: !outOfFlow && !tablePart,
-      flexItem: parentFlexGrid && !outOfFlow,
-      inline: display === "inline",
-      blockFlow: !parentFlexGrid && !display.startsWith("inline") && cs.float === "none" && !outOfFlow,
-      tx: 0,
-      ty: 0,
-      w: null,
-      h: null,
-      mr: null,
-      mb: null,
-      deleted: false,
-      collapsed: false,
-      css: {},
-      created: false,
-      name: describe(el),
-      selector: selectorFor(el)
-    };
-    recs.set(el, rec);
-    return rec;
-  }
-  function markCreated(el) {
-    const rec = ensureRec(el);
-    rec.created = true;
-    rec.origStyle = null;
-    rec.origParent = null;
-    rec.origNext = null;
-    return rec;
-  }
-  function composeTranslate(base, tx, ty) {
-    const x = r2(tx);
-    const y = r2(ty);
-    if (!base || base === "none") return `${x}px ${y}px`;
-    const parts = base.trim().split(/\s+/);
-    const bx = parts[0] || "0px";
-    const by = parts[1] || "0px";
-    const bz = parts[2];
-    return `calc(${bx} + ${x}px) calc(${by} + ${y}px)${bz ? " " + bz : ""}`;
-  }
-  function applyRec(rec) {
-    const el = rec.el;
-    if (rec.origStyle == null) el.removeAttribute("style");
-    else el.style.cssText = rec.origStyle;
-    const s = el.style;
-    const set = (p, v) => s.setProperty(p, v, IMP);
-    const moved = Math.abs(rec.tx) > 4e-3 || Math.abs(rec.ty) > 4e-3;
-    const sized = rec.w != null || rec.h != null;
-    if (moved) {
-      if (rec.inline && !sized && (rec.o.position === "static" || rec.o.position === "relative")) {
-        const base = (v) => rec.o.position === "relative" && /px$/.test(v || "") ? parseFloat(v) : 0;
-        set("position", "relative");
-        set("left", r2(base(rec.o.left) + rec.tx) + "px");
-        set("top", r2(base(rec.o.top) + rec.ty) + "px");
-      } else {
-        if (rec.inline) set("display", "inline-block");
-        set("translate", composeTranslate(rec.o.translate, rec.tx, rec.ty));
-      }
-    }
-    if (sized) {
-      set("box-sizing", "border-box");
-      if (rec.inline) set("display", "inline-block");
-      if (rec.flexItem) {
-        set("flex-grow", "0");
-        set("flex-shrink", "0");
-        set("flex-basis", "auto");
-      }
-    }
-    if (rec.w != null) {
-      set("width", r2(rec.w) + "px");
-      set("min-width", "0px");
-      set("max-width", "none");
-    }
-    if (rec.h != null) {
-      set("height", r2(rec.h) + "px");
-      set("min-height", "0px");
-      set("max-height", "none");
-    }
-    if (rec.mr != null) set("margin-right", r2(rec.mr) + "px");
-    if (rec.mb != null) set("margin-bottom", r2(rec.mb) + "px");
-    for (const p in rec.css) set(p, rec.css[p]);
-    if (rec.deleted && !rec.collapsed) {
-      set("visibility", "hidden");
-      set("pointer-events", "none");
-    }
-    if (rec.collapsed) set("display", "none");
-  }
-  function beginOp(el) {
-    const rec = ensureRec(el);
-    const rect = rectOf(el);
-    const next = rec.inFlow ? nextFlowSibling(el) : null;
-    const parent = el.parentElement;
-    return {
-      el,
-      rec,
-      start: { rect, tx: rec.tx, ty: rec.ty, w: rec.w, h: rec.h, mr: rec.mr, mb: rec.mb },
-      next,
-      next0: next ? rectOf(next) : null,
-      parent,
-      parent0: parent ? rectOf(parent) : null
-    };
-  }
-  function moveTo(op, x, y) {
-    const { rec, start } = op;
-    rec.tx = start.tx + (x - start.rect.x);
-    rec.ty = start.ty + (y - start.rect.y);
-    applyRec(rec);
-  }
-  function residual(op) {
-    const { next, next0, parent, parent0, start } = op;
-    const ex = start.rect.x - start.tx;
-    const ey = start.rect.y - start.ty;
-    const er = { x: ex, y: ey, w: start.rect.w, h: start.rect.h };
-    let rx = 0;
-    let ry = 0;
-    const p = parent && parent0 ? rectOf(parent) : null;
-    if (next && next0 && next.isConnected) {
-      const n = rectOf(next);
-      const sameRow = next0.y < er.y + er.h - 1 && next0.x >= er.x + er.w - 1.5;
-      if (sameRow) {
-        rx = n.x - next0.x;
-        if (p) ry = p.h - parent0.h;
-      } else {
-        ry = n.y - next0.y;
-        if (p) rx = p.w - parent0.w;
-      }
-    } else if (p) {
-      rx = p.w - parent0.w;
-      ry = p.h - parent0.h;
-    }
-    return { rx, ry };
-  }
-  function resizeTo(op, t) {
-    const { rec, el, start } = op;
-    const changeW = Math.abs(t.w - start.rect.w) > 0.05;
-    const changeH = Math.abs(t.h - start.rect.h) > 0.05;
-    rec.w = changeW ? Math.max(1, t.w) : start.w;
-    rec.h = changeH ? Math.max(1, t.h) : start.h;
-    if (rec.inFlow) {
-      const dW = (changeW ? rec.w : start.rect.w) - start.rect.w;
-      const dH = (changeH ? rec.h : start.rect.h) - start.rect.h;
-      const baseMr = start.mr != null ? start.mr : rec.o.mr;
-      const baseMb = start.mb != null ? start.mb : rec.o.mb;
-      rec.mr = changeW && !rec.blockFlow ? baseMr - dW : start.mr;
-      rec.mb = changeH ? baseMb - dH : start.mb;
-      applyRec(rec);
-      for (let i = 0; i < 3; i++) {
-        const { rx, ry } = residual(op);
-        if (Math.abs(rx) < 0.4 && Math.abs(ry) < 0.4) break;
-        if (Math.abs(rx) >= 0.4) rec.mr = (rec.mr != null ? rec.mr : rec.o.mr) - rx;
-        if (Math.abs(ry) >= 0.4) rec.mb = (rec.mb != null ? rec.mb : rec.o.mb) - ry;
-        applyRec(rec);
-      }
-    } else {
-      applyRec(rec);
-    }
-    const now = rectOf(el);
-    rec.tx += t.x - now.x;
-    rec.ty += t.y - now.y;
-    applyRec(rec);
-    requestFull();
-  }
-  function setDeleted(el, on) {
-    const rec = ensureRec(el);
-    rec.deleted = on;
-    applyRec(rec);
-    requestFull();
-  }
-  function setCss(el, props) {
-    const rec = ensureRec(el);
-    for (const p in props) {
-      if (props[p] == null) delete rec.css[p];
-      else rec.css[p] = props[p];
-    }
-    applyRec(rec);
-    requestFull();
-  }
-  function isEdited(rec) {
-    return rec.created || Math.abs(rec.tx) > 0.5 || Math.abs(rec.ty) > 0.5 || rec.w != null || rec.h != null || rec.deleted || rec.collapsed || Object.keys(rec.css).length > 0 || rec.el.parentNode !== rec.origParent;
-  }
-  function cloneRec(rec) {
-    return { ...rec, css: { ...rec.css } };
-  }
-  function snapshot(el) {
-    const rec = recs.get(el);
-    return {
-      style: el.getAttribute("style"),
-      parent: el.parentNode,
-      next: el.nextSibling,
-      rec: rec ? cloneRec(rec) : null
-    };
-  }
-  function sameSnapshot(a, b) {
-    if (a.style !== b.style || a.parent !== b.parent || a.next !== b.next) return false;
-    const ra = a.rec;
-    const rb = b.rec;
-    if (!ra || !rb) return !ra && !rb;
-    return ra.tx === rb.tx && ra.ty === rb.ty && ra.w === rb.w && ra.h === rb.h && ra.mr === rb.mr && ra.mb === rb.mb && ra.deleted === rb.deleted && ra.collapsed === rb.collapsed && JSON.stringify(ra.css) === JSON.stringify(rb.css);
-  }
-  function restoreDom(el, snap2) {
-    if (!snap2.parent) {
-      if (el.parentNode) el.parentNode.removeChild(el);
-      return;
-    }
-    if (el.parentNode === snap2.parent && el.nextSibling === snap2.next) return;
-    if (snap2.next && snap2.next.parentNode === snap2.parent) snap2.parent.insertBefore(el, snap2.next);
-    else snap2.parent.appendChild(el);
-  }
-  function restoreState(el, snap2) {
-    if (snap2.style == null) el.removeAttribute("style");
-    else el.style.cssText = snap2.style;
-    if (snap2.rec) recs.set(el, cloneRec(snap2.rec));
-    else recs.delete(el);
-  }
-  function allRecs() {
-    return [...recs.values()].sort((a, b) => a.id - b.id);
   }
 
   // src/content/history.js
@@ -1617,14 +1948,16 @@
       glow.addColorStop(0.93, "rgba(225,248,255,0.9)");
       glow.addColorStop(1, "rgba(255,255,255,1)");
     }
+    const L = minLevel();
+    app.drawn = 0;
     for (const c of app.cands) {
-      if (c.dup || c.w < 1 || c.h < 1) continue;
+      if (c.dup || c.w < 1 || c.h < 1 || c.lv < L) continue;
       if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
       if (app.hiddenForCapture.size && app.hiddenForCapture.has(c.el)) continue;
       const clip = c.clip ? clipRect(c.clip) : null;
       if (clip === false) continue;
       if (clip && (c.x >= clip.x + clip.w || c.y >= clip.y + clip.h || c.x + c.w <= clip.x || c.y + c.h <= clip.y)) continue;
-      const under = occ.length && !c.isOcc && !c.occ ? occ.filter((o) => overlapsR(o, c)) : null;
+      const under = occ.length && !c.isOcc && !c.occ && !c.top ? occ.filter((o) => overlapsR(o, c)) : null;
       if (under && under.some((o) => o.x <= c.x && o.y <= c.y && o.x + o.w >= c.x + c.w && o.y + o.h >= c.y + c.h)) continue;
       const hidden = under && under.length ? under : null;
       let e = 1;
@@ -1651,6 +1984,7 @@
         e = easeOutCubic(p);
         fp = clamp((e - 0.2) / 0.8, 0, 1);
       }
+      app.drawn++;
       const col = hueFor(c.depth, mode);
       const clipped = clip && !(c.x >= clip.x && c.y >= clip.y && c.x + c.w <= clip.x + clip.w && c.y + c.h <= clip.y + clip.h);
       const saved = clipped || hidden || cut;
@@ -1753,7 +2087,7 @@
       const ok = (r) => {
         if (r.x < 0 || r.y < 0 || r.x + r.w > app.vw || r.y + r.h > app.vh) return false;
         if (v.clip && (r.y + r.h > v.clip.y + v.clip.h + 1 || r.x + r.w > v.clip.x + v.clip.w + 1)) return false;
-        if (app.occRects && app.occRects.length && !c.isOcc && !c.occ) {
+        if (app.occRects && app.occRects.length && !c.isOcc && !c.occ && !c.top) {
           for (const o of app.occRects) if (overlapsR(o, r)) return false;
         }
         if (words.hits(r, 0.5)) return false;
@@ -1887,10 +2221,10 @@
     infoChip(ctx, r, elInfo(el, r, c), hsla(col, 0.97, -10));
   }
   var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
-  var MOD_NAME = MAC ? "Ctrl/⌘" : "Ctrl";
+  var ALT_NAME = MAC ? "Option" : "Alt";
   function climbTarget(el) {
     const cur2 = app.sel.length === 1 && app.sel[0].kind === "el" ? app.sel[0].el : null;
-    if (cur2 && cur2.isConnected && deepContains(cur2, el)) return parentPick(cur2) || cur2;
+    if (cur2 && cur2.isConnected && deepContains(cur2, el)) return parentPick(cur2, minLevel()) || cur2;
     return el;
   }
   function alikeBase(el) {
@@ -1903,16 +2237,16 @@
     const el = h.el;
     const mods = app.mods;
     const col = [270, 88, 58];
-    if (mods.mod && mods.shift) return drawAlikePreview(ctx, el, now);
+    if (mods.alt && mods.shift) return drawAlikePreview(ctx, el, now);
     let target = el;
-    if (mods.mod) target = climbTarget(el);
+    if (mods.alt) target = climbTarget(el);
     const r = rectOf(target);
     if (r.w < 1 || r.h < 1) return;
     const c = app.candByEl.get(target) || itemCtx(elItem(target));
     hoverBox(ctx, target, r, c, col, now, true);
     if (c.flex || c.grid) drawFlexGaps(ctx, target, r, c);
     const picked = app.sel.some((s) => s.kind === "el" && s.el === target);
-    if (mods.mod && target !== el) infoChip(ctx, r, `${MOD_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
+    if (mods.alt && target !== el) infoChip(ctx, r, `${ALT_NAME}-click picks the box around it: ${describe(target)}`, hsla(col, 0.97, -16));
     else if (!picked) infoChip(ctx, r, elInfo(target, r, c), hsla(col, 0.97, -12));
   }
   function drawAlikePreview(ctx, el, now) {
@@ -1939,7 +2273,7 @@
     ctx.restore();
     const r = rectOf(base);
     const n = list.length;
-    const s = n > 1 ? `${MOD_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
+    const s = n > 1 ? `${ALT_NAME}+Shift-click picks all ${n} like this (${alikeLabel(base)})` : `Nothing else here looks like this (${alikeLabel(base)})`;
     infoChip(ctx, r, s, hsla(col, 0.97, -18));
     popped(base, r, now);
   }
@@ -2027,8 +2361,9 @@
       }
     };
     if (!app.state.canvasMode && app.state.guides) {
+      const L = minLevel();
       for (const c of app.cands) {
-        if (c.dup || c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
+        if (c.dup || c.lv < L || c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
         if (exclude && exclude.some((e) => deepContains(e, c.el))) continue;
         consider(c);
       }
@@ -2327,10 +2662,11 @@
     if (crowded && !inSel) for (const s of activeShapes()) test(shapeRect(s), { it: shapeItem(s) });
     if (pageEls && crowded && !inSel) {
       const onBar = app.occRects && app.occRects.some((o) => containsPt(o, mx, my));
+      const L = minLevel();
       for (const c of app.cands) {
-        if (c.dup || c.w < 6 || c.h < 6) continue;
+        if (c.dup || c.w < 6 || c.h < 6 || c.lv < L) continue;
         if (c.x > mx + 8 || c.x + c.w < mx - 8 || c.y > my + 8 || c.y + c.h < my - 8) continue;
-        if (onBar && !c.isOcc && !c.occ) continue;
+        if (onBar && !c.isOcc && !c.occ && !c.top) continue;
         if (c.clip) {
           const k = clipRect(c.clip);
           if (k === false || k && !containsPt(k, mx, my, 2)) continue;
@@ -2376,8 +2712,9 @@
     for (const s of activeShapes()) push(shapeItem(s), shapeRect(s), s);
     const pageEls = app.state.mode === "change" && !app.state.canvasMode && app.state.guides;
     if (pageEls) {
+      const L = minLevel();
       for (const c of app.cands) {
-        if (c.dup || c.w < 10 || c.h < 10) continue;
+        if (c.dup || c.w < 10 || c.h < 10 || c.lv < L) continue;
         if (c.x > W || c.y > H || c.x + c.w < 0 || c.y + c.h < 0) continue;
         if (c.x > m.x + R2 || c.x + c.w < m.x - R2 || c.y > m.y + R2 || c.y + c.h < m.y - R2) continue;
         push(null, c, c.el);
@@ -2697,7 +3034,7 @@
     for (const el of els) if (el && el.isConnected) m.set(el, rectOf(el));
     return m;
   }
-  function flip(first) {
+  function flip(first, ms = FLIP_MS) {
     let n = 0;
     for (const [el, f] of first) {
       if (!el.isConnected) continue;
@@ -2706,16 +3043,18 @@
       const dy = f.y - l.y;
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
       try {
-        el.animate([{ translate: `${dx}px ${dy}px` }, { translate: "0px 0px" }], {
-          duration: FLIP_MS,
+        const an = el.animate([{ translate: `${dx}px ${dy}px` }, { translate: "0px 0px" }], {
+          duration: ms,
           easing: "cubic-bezier(.2,.85,.25,1)",
           composite: "add"
         });
+        flips.add(an);
+        an.onfinish = an.oncancel = () => flips.delete(an);
         n++;
       } catch {
       }
     }
-    liveFor(FLIP_MS + 60);
+    liveFor(ms + 60);
     return n;
   }
   function pulse(x, y, color = "rgba(124,58,237,ALPHA)", dur = 750, scale = 1) {
@@ -2797,6 +3136,13 @@
     wrap.setAttribute("data-pd-group", "");
     touch(wrap);
     for (const el of els) touch(el);
+    for (const el of els) {
+      const r = getRec(el);
+      if (r && r.free) {
+        r.free = null;
+        applyRec(r);
+      }
+    }
     const rec = markCreated(wrap);
     rec.name = "New group";
     rec.css = {
@@ -2984,7 +3330,7 @@
     return items.map((i) => i.el);
   }
   function pulseReflow(origin) {
-    const edited = allRecs().filter((r) => r.el.isConnected && !r.created && isEdited(r));
+    const edited = allRecs().filter((r) => r.el.isConnected && !r.created && !r.free && isEdited(r));
     if (origin) pulse(origin.x, origin.y, "rgba(124,58,237,ALPHA)", 820, 1);
     if (!edited.length) return { ok: true, msg: "Nothing to reflow yet — move or resize something first" };
     begin("Reflow");
@@ -3058,7 +3404,7 @@
     return best;
   }
   function magicFix(origin) {
-    let targets = allRecs().filter((r) => r.el.isConnected && !r.created && !r.deleted && (Math.abs(r.tx) > 0.5 || Math.abs(r.ty) > 0.5 || r.w != null || r.h != null));
+    let targets = allRecs().filter((r) => r.el.isConnected && !r.created && !r.deleted && !r.free && (Math.abs(r.tx) > 0.5 || Math.abs(r.ty) > 0.5 || r.w != null || r.h != null));
     let items = targets.map((r) => elItem(r.el));
     const shapeSel = app.sel.filter((s) => s.kind === "shape");
     if (!items.length && app.sel.length) items = app.sel.slice();
@@ -3202,8 +3548,11 @@
       r.deleted = false;
       r.collapsed = false;
       r.css = {};
-      if (r.origStyle == null) r.el.removeAttribute("style");
-      else r.el.style.cssText = r.origStyle;
+      r.free = null;
+      r.fw = null;
+      r.fh = null;
+      r.freeCss = null;
+      applyRec(r);
     }
     commit();
     flip(first);
@@ -3238,6 +3587,22 @@
     if (f.wrap === "wrap") parts.push("wraps");
     return parts.join(", ");
   }
+  function spotWords(el, r) {
+    const page = `${Math.round(r.x + window.scrollX)}px from the page's left and ${Math.round(r.y + window.scrollY)}px from the page's top`;
+    const cx = r.x + r.w / 2;
+    const cy = r.y + r.h / 2;
+    if (cx < 0 || cy < 0 || cx >= app.vw || cy >= app.vh) return page;
+    let under = null;
+    try {
+      under = document.elementsFromPoint(cx, cy).find((e) => e !== app.host && !deepContains(el, e) && !isRootish(e)) || null;
+    } catch {
+    }
+    let box = under;
+    while (box && !isRootish(box) && !containsRect(rectOf(box), r, 1)) box = parentOf(box);
+    if (!box || isRootish(box)) return page;
+    const b = rectOf(box);
+    return `over ${describe(box)} (\`${selectorFor(box)}\`), ${Math.round(r.x - b.x)}px from its left and ${Math.round(r.y - b.y)}px from its top (${page})`;
+  }
   function buildEditsText() {
     const lines = [];
     const url = location.origin + location.pathname;
@@ -3265,7 +3630,18 @@
       const now = rectOf(el);
       if (r.collapsed) out.push("remove it (the space it took is closed up)");
       else if (r.deleted) out.push("hide/remove it (its space stays empty for now)");
-      else {
+      else if (r.free) {
+        const home = r.home && r.home.isConnected ? r.home : el.parentElement;
+        const from = home && !isRootish(home) ? `out of ${describe(home)} (\`${selectorFor(home)}\`)` : "out of the box it was in";
+        out.push(`take it ${from} so the rest close up the gap, and put it ${spotWords(el, now)}`);
+        const sizeChanged = Math.abs(now.w - r.orig.w) > 0.5 || Math.abs(now.h - r.orig.h) > 0.5;
+        if (sizeChanged) {
+          const parts = [];
+          if (Math.abs(now.w - r.orig.w) > 0.5) parts.push(`width ${both(r.orig.w, "w", c)} → ${both(now.w, "w", c)}`);
+          if (Math.abs(now.h - r.orig.h) > 0.5) parts.push(`height ${both(r.orig.h, "h", c)} → ${both(now.h, "h", c)}`);
+          out.push(parts.join("; "));
+        }
+      } else {
         const sizeChanged = Math.abs(now.w - r.orig.w) > 0.5 || Math.abs(now.h - r.orig.h) > 0.5;
         if (sizeChanged) {
           const parts = [];
@@ -3593,14 +3969,14 @@
       this.list = [];
     }
     set(el, prop, val) {
-      this.list.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)]);
+      this.list.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop), el.hasAttribute("style")]);
       el.style.setProperty(prop, val, "important");
     }
     restore() {
       for (let i = this.list.length - 1; i >= 0; i--) {
-        const [el, p, v, pr] = this.list[i];
+        const [el, p, v, pr, had] = this.list[i];
         if (v) el.style.setProperty(p, v, pr);
-        else el.style.removeProperty(p);
+        else unsetStyle(el, p, had);
       }
       this.list = [];
     }
@@ -3686,14 +4062,14 @@
   }
   var Hider = class {
     constructor(items) {
-      this.items = items.map((it) => ({ ...it, v: it.el.style.getPropertyValue("visibility"), p: it.el.style.getPropertyPriority("visibility"), off: false }));
+      this.items = items.map((it) => ({ ...it, v: it.el.style.getPropertyValue("visibility"), p: it.el.style.getPropertyPriority("visibility"), had: it.el.hasAttribute("style"), off: false }));
     }
     set(it, off) {
       if (it.off === off) return;
       it.off = off;
       if (off) it.el.style.setProperty("visibility", "hidden", "important");
       else if (it.v) it.el.style.setProperty("visibility", it.v, it.p);
-      else it.el.style.removeProperty("visibility");
+      else unsetStyle(it.el, "visibility", it.had);
     }
     // which: 'all' | 'first' | 'last' | 'none'
     show(which) {
@@ -3971,7 +4347,7 @@
       sc.to(0);
       await frames(2);
       await sleep(150);
-      hider = new Hider(classifyFixed(pos.fixed));
+      hider = new Hider(classifyFixed(sc.kind === "el" ? pos.fixed.concat(freeEls()) : pos.fixed));
       const view = sc.view();
       const H = Math.min(sc.height(), MAX_CSS_H);
       const maxTop = Math.max(0, H - view.h);
@@ -4082,6 +4458,7 @@
           if (UNITS.includes(p.unit)) app.state.unit = p.unit;
           if (typeof p.fill === "number" && p.fill >= 0 && p.fill <= 1) app.state.fill = p.fill;
           if (typeof p.guides === "boolean") app.state.guides = p.guides;
+          if (DETAILS.includes(p.detail)) app.state.detail = p.detail;
           resolve(p);
         });
       } catch {
@@ -4093,7 +4470,7 @@
     clearTimeout(timer);
     timer = setTimeout(() => {
       try {
-        chrome.storage.local.set({ [KEY]: { unit: app.state.unit, fill: app.state.fill, guides: app.state.guides } });
+        chrome.storage.local.set({ [KEY]: { unit: app.state.unit, fill: app.state.fill, guides: app.state.guides, detail: app.state.detail } });
       } catch {
       }
     }, 250);
@@ -4213,16 +4590,14 @@
   var hintTimer = 0;
   var toastTimer = 0;
   var selHintShown = false;
+  var ALT = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "") ? "Option" : "Alt";
   function hintFor() {
     const st = app.state;
     if (st.canvasMode) return "Drag to draw boxes · Shift-drag or double-click-drag to select · Esc leaves the canvas";
     if (st.mode === "draw") return "Drag to draw a box · drag a box to move it · grab the arrows on its edges to resize · Esc to stop";
     if (st.mode === "change")
-      return `Click to pick anything · ${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks everything like it · drag to move · W A S D resize`;
-    return "Hover anything to see its size and spacing · U switches units · H hides guides · Esc closes";
-  }
-  function modKey() {
-    return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "") ? "Ctrl/⌘" : "Ctrl";
+      return `Click to pick anything · double-click or ${ALT}-click for the box around it · ${ALT}+Shift-click picks everything like it · drag anything anywhere, even out of its box`;
+    return "Hover anything to see its size and spacing · U switches units · L changes the detail · H hides guides · Esc closes";
   }
   function showHint(text, ms = 6500) {
     if (!R.hint) return;
@@ -4415,6 +4790,29 @@
     sync();
     requestFull();
     toast(app.state.guides ? "Guides on" : "Guides off — your boxes and edits stay", 1500);
+  }
+  var LEVEL = {
+    all: ["All", "every box, down to each word"],
+    blocks: ["Blocks", "cards, columns, buttons and pictures — no loose words"],
+    sections: ["Sections", "just the big parts: header, sections, sidebar, footer"]
+  };
+  function levelTip(d) {
+    const next = DETAILS[(DETAILS.indexOf(d) + 1) % DETAILS.length];
+    return `Detail: ${LEVEL[d][0]} — ${LEVEL[d][1]} · click for ${LEVEL[next][0]} (L)`;
+  }
+  function cycleDetail(dir2 = 1) {
+    const st = app.state;
+    if (!st.guides) {
+      st.guides = true;
+    } else {
+      const i = DETAILS.indexOf(st.detail);
+      st.detail = DETAILS[(i + dir2 + DETAILS.length) % DETAILS.length];
+    }
+    app.hover = null;
+    savePrefs();
+    sync();
+    requestFull();
+    toast(`Detail: ${LEVEL[st.detail][0]} — ${LEVEL[st.detail][1]}`, 1800);
   }
   var canvasPrev = "measure";
   function leaveCanvas() {
@@ -4756,9 +5154,14 @@
     R.draw.classList.toggle("on", st.mode === "draw" && !st.canvasMode);
     R.canvas.classList.toggle("on", st.canvasMode);
     R.change.classList.toggle("on", st.mode === "change" && !st.canvasMode);
-    for (const g of [R.guidesW, R.guidesP]) {
-      g.classList.toggle("off", !st.guides);
-      g.dataset.tip = st.guides ? "Hide guides (H)" : "Show guides (H)";
+    for (const g of [R.detailW, R.detailP]) {
+      g.w.classList.toggle("off", !st.guides);
+      const tip = st.guides ? "Hide all guides (H)" : "Show guides (H)";
+      g.eye.dataset.tip = tip;
+      g.eye.setAttribute("aria-label", tip);
+      g.txt.textContent = LEVEL[st.detail][0];
+      g.lvl.dataset.tip = levelTip(st.detail);
+      g.lvl.setAttribute("aria-label", `Detail level: ${LEVEL[st.detail][0]}`);
     }
     R.unitTxt.textContent = st.unit;
     R.unit.classList.toggle("long", st.unit.length > 3);
@@ -4772,7 +5175,7 @@
     updateFlexPanel();
     if (st.mode === "change" && !st.canvasMode && app.sel.length === 1 && !selHintShown) {
       selHintShown = true;
-      showHint(`${modKey()}-click again for the box around it · ${modKey()}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7e3);
+      showHint(`Double-click or ${ALT}-click for the box around it · ${ALT}+Shift-click picks all like it · Shift-click adds more · W/S shorter/taller · A/D narrower/wider`, 7e3);
     }
     app.uiRectDirty = true;
   }
@@ -4867,7 +5270,7 @@
         setMode("change");
       } else setMode(st.mode === "change" ? "measure" : "change");
     });
-    R.guidesW = guidesButton(white);
+    R.detailW = detailPill(white);
     R.reflow = split(
       purple,
       "reflow",
@@ -4899,7 +5302,7 @@
       ],
       ["Reset everything back to the original page", "reset", (e, w) => runTool(w, resetAll)]
     );
-    R.guidesP = guidesButton(purple);
+    R.detailP = detailPill(purple);
     R.fly = mk("div", "fly ui", root);
     fillAlign(R.fly);
     R.afloat = mk("div", "afloat ui", root);
@@ -4937,20 +5340,33 @@
       setCanvas,
       cycleUnit,
       toggleGuides,
+      cycleDetail,
       group: () => runTool(R.group, group),
       ungroup: () => runTool(R.group, ungroup),
       cancelCapture: stopCapture
     });
   }
-  function guidesButton(parent) {
-    const b = circle(parent, "guides", null, "Hide guides (H)", () => toggleGuides());
+  function detailPill(parent) {
+    const w = mk("div", "btn duo detail", parent);
+    const eye = mk("button", "seg eye", w);
+    eye.type = "button";
     const on = iconEl("eye");
     on.classList.add("i-on");
     const off = iconEl("eyeOff");
     off.classList.add("i-off");
-    b.prepend(off);
-    b.prepend(on);
-    return b;
+    eye.append(on, off);
+    const lvl = mk("button", "seg lvl", w);
+    lvl.type = "button";
+    const txt = mk("span", "txt", lvl, LEVEL[app.state.detail][0]);
+    eye.addEventListener("click", () => {
+      hideTip();
+      toggleGuides();
+    });
+    lvl.addEventListener("click", (e) => {
+      hideTip();
+      cycleDetail(e.shiftKey ? -1 : 1);
+    });
+    return { w, eye, lvl, txt };
   }
 
   // src/content/snap.js
@@ -4974,8 +5390,9 @@
     for (const s of activeShapes()) if (!movingShapes.has(s)) add(shapeRect(s));
     if (!app.state.canvasMode) {
       let n = 0;
+      const L = minLevel();
       for (const c of app.cands) {
-        if (c.dup || c.w * c.h < 300) continue;
+        if (c.dup || c.w * c.h < 300 || c.lv < L) continue;
         if (c.x > app.vw || c.y > app.vh || c.x + c.w < 0 || c.y + c.h < 0) continue;
         if (movingEls.some((m) => deepContains(m, c.el))) continue;
         add({ x: c.x, y: c.y, w: c.w, h: c.h });
@@ -5051,8 +5468,11 @@
   }
 
   // src/content/interact.js
-  var lastUp = { t: 0, x: -99, y: -99 };
+  var lastUp = { t: 0, x: -99, y: -99, click: false, count: 0 };
   var cursor = "";
+  var toldPull = false;
+  var MULTI_MS = 500;
+  var PULL = 6;
   function interactive() {
     const st = app.state;
     return st.canvasMode || st.mode === "draw" || st.mode === "change";
@@ -5066,7 +5486,7 @@
     }
     return false;
   }
-  function pickElement(x, y) {
+  function pickElement(x, y, min = minLevel()) {
     let list;
     try {
       list = document.elementsFromPoint(x, y);
@@ -5091,7 +5511,8 @@
     }
     let e = hit;
     while (e && !isRootish(e)) {
-      if (app.candByEl.has(e)) return e;
+      const c = app.candByEl.get(e);
+      if (c && c.lv >= min) return e;
       e = parentOf(e);
     }
     return null;
@@ -5204,10 +5625,10 @@
     app.mouse.inside = inside;
   }
   function setMods(e) {
-    const mod = !!(e.metaKey || e.ctrlKey);
+    const alt = !!e.altKey;
     const shift = !!e.shiftKey;
-    if (app.mods.mod === mod && app.mods.shift === shift) return;
-    app.mods = { mod, shift };
+    if (app.mods.alt === alt && app.mods.shift === shift) return;
+    app.mods = { alt, shift };
     requestRender();
   }
   function onDown(e) {
@@ -5222,7 +5643,8 @@
     const y = e.clientY;
     setMouse(x, y, true);
     const now = performance.now();
-    const dbl = now - lastUp.t < 400 && Math.hypot(x - lastUp.x, y - lastUp.y) < 12;
+    const dbl = now - lastUp.t < MULTI_MS && Math.hypot(x - lastUp.x, y - lastUp.y) < 12;
+    const count = dbl && lastUp.click ? lastUp.count + 1 : 1;
     let hot = findHot(x, y);
     if (hot && hot.type === "chip" && e.shiftKey) hot = null;
     const item = !hot || hot.type === "chip" ? itemAt(x, y) : null;
@@ -5238,6 +5660,7 @@
       alt: e.altKey,
       mod: e.metaKey || e.ctrlKey,
       dbl,
+      count,
       pointerId: e.pointerId
     };
     requestRender();
@@ -5284,7 +5707,7 @@
     app.drag = null;
     if (d.type === "pending") click(d);
     else endDrag(d);
-    lastUp = { t: performance.now(), x: e.clientX, y: e.clientY };
+    lastUp = { t: performance.now(), x: e.clientX, y: e.clientY, click: d.type === "pending", count: d.count || 1 };
     app.snapLines = [];
     app.marquee = null;
     app.preview = null;
@@ -5310,7 +5733,9 @@
     if (hot && hot.type === "spacing") return beginSpacing(d);
     if (d.shift || d.dbl && !d.item) return beginMarquee(d);
     if (d.item) {
-      const inside = d.item.kind === "el" && liveSel().some((s) => s.kind === "el" && s.el !== d.item.el && deepContains(s.el, d.item.el));
+      const inside = d.item.kind === "el" && liveSel().some(
+        (s) => s.kind === "el" && s.el !== d.item.el && (deepContains(s.el, d.item.el) || deepContains(d.item.el, s.el) && containsPt(rectOf(s.el), d.sx, d.sy))
+      );
       if (!isSelected(d.item) && !inside) setSelection([d.item]);
       if (d.alt && app.sel.every((s) => s.kind === "shape")) {
         begin("Duplicate");
@@ -5354,6 +5779,7 @@
     } else if (d.type === "move" || d.type === "edge" || d.type === "corner" || d.type === "spacing") {
       commit();
     }
+    if (d.restructured) requestCollect();
     requestFull();
   }
   function cancelDrag() {
@@ -5363,6 +5789,7 @@
     if (d.live) app.live = Math.max(0, app.live - 1);
     if (d.type === "move" || d.type === "edge" || d.type === "corner" || d.type === "spacing") cancel();
     if (d.type === "marquee") setSelection(d.base || []);
+    if (d.restructured) requestCollect();
     try {
       app.layer.releasePointerCapture(d.pointerId);
     } catch {
@@ -5436,12 +5863,137 @@
   }
   function beginMove(d, inTx = false) {
     if (!inTx) begin("Move");
+    settleFlips();
     const items = liveSel();
     d.type = "move";
     d.items = items.map(startState);
     d.box0 = union(d.items.map((s) => s.rect));
     d.targets = buildTargets(items);
+    if (app.state.mode === "change" && !app.state.canvasMode) {
+      for (const s of d.items) if (s.it.kind === "el") findHome(d, s);
+    }
     goLive(d, items);
+  }
+  function homeOf(el) {
+    let p = parentOf(el);
+    for (let i = 0; p && !isRootish(p) && i < 40; i++, p = parentOf(p)) {
+      if (p === app.host) return null;
+      let cs;
+      try {
+        cs = getComputedStyle(p);
+      } catch {
+        return null;
+      }
+      if (cs.display === "contents") continue;
+      if (cs.overflowX !== "visible" || cs.overflowY !== "visible" || cs.clipPath && cs.clipPath !== "none" || /paint|strict|content/.test(cs.contain || "")) return p;
+      if (hasPaint(cs)) return p;
+      if (thingsIn(p) >= 2) return p;
+    }
+    return null;
+  }
+  function thingsIn(p) {
+    let n = 0;
+    for (const k of p.childNodes) {
+      if (k.nodeType === 3) {
+        if (k.nodeValue && k.nodeValue.trim()) n++;
+      } else if (k.nodeType === 1 && k !== app.host) {
+        const r = k.getBoundingClientRect();
+        if (r.width >= 1 && r.height >= 1) n++;
+      }
+      if (n >= 2) return n;
+    }
+    return n;
+  }
+  function liftOf(el, home) {
+    let t = el;
+    for (let p = parentOf(t); p && p !== home && !isRootish(p); p = parentOf(p)) t = p;
+    return t;
+  }
+  function findHome(d, s) {
+    const el = s.it.el;
+    const home = homeOf(el);
+    if (!home) return;
+    const lift = liftOf(el, home);
+    if (!isFree(lift) && !canPull(lift)) return;
+    s.home = home;
+    s.lift = lift;
+    const r = s.rect;
+    s.probe = { x: Math.min(Math.max(d.sx, r.x + 1), r.x + r.w - 1), y: Math.min(Math.max(d.sy, r.y + 1), r.y + r.h - 1) };
+    if (lift !== el && isFree(lift)) {
+      touch(lift);
+      s.lop = beginOp(lift);
+      const er = rectOf(el);
+      const lr = rectOf(lift);
+      s.off = { x: er.x - lr.x, y: er.y - lr.y };
+    }
+    d.pull = true;
+  }
+  function markLifted(el, on) {
+    for (const c of app.cands) {
+      if (!deepContains(el, c.el)) continue;
+      c.top = on;
+      if (on) {
+        c.clip = null;
+        c.occ = null;
+        c.dynamic = true;
+      }
+    }
+  }
+  function pullCheck(d) {
+    const todo = [];
+    for (const s of d.items) {
+      if (!s.home || !s.home.isConnected) continue;
+      const x = s.probe.x + d.x - d.sx;
+      const y = s.probe.y + d.y - d.sy;
+      const H = rectOf(s.home);
+      const free = isFree(s.lift);
+      if (!free && (x < H.x - PULL || x > H.x + H.w + PULL || y < H.y - PULL || y > H.y + H.h + PULL)) todo.push([s, true]);
+      else if (free && x > H.x + 2 && x < H.x + H.w - 2 && y > H.y + 2 && y < H.y + H.h - 2) todo.push([s, false]);
+    }
+    if (!todo.length) return;
+    const watch = /* @__PURE__ */ new Set();
+    for (const [s, out] of todo) {
+      for (const k of s.home.children) if (k !== s.lift && k !== app.host) watch.add(k);
+      if (!out) watch.add(s.lift);
+    }
+    const first = captureRects([...watch]);
+    let pulled = false;
+    for (const [s, out] of todo) {
+      const el = s.it.el;
+      const own = s.lift === el;
+      if (out) {
+        if (!own) {
+          s.op.rec.tx = s.op.start.tx;
+          s.op.rec.ty = s.op.start.ty;
+          applyRec(s.op.rec);
+          if (!s.lop) {
+            touch(s.lift);
+            s.lop = beginOp(s.lift);
+          }
+        }
+        if (pullOut(own ? s.op : s.lop, s.home)) {
+          pulled = true;
+          s.back = false;
+          if (!own) {
+            const er = rectOf(el);
+            const lr = rectOf(s.lift);
+            s.off = { x: er.x - lr.x, y: er.y - lr.y };
+          }
+          markLifted(s.lift, true);
+        }
+      } else {
+        putBack(own ? s.op : s.lop);
+        s.back = true;
+        markLifted(s.lift, false);
+      }
+    }
+    d.restructured = true;
+    flip(first, 280);
+    d.targets = buildTargets(liveSel());
+    if (pulled && !toldPull) {
+      toldPull = true;
+      hub.toast("Pulled it out of its box — the rest closed up · drop it back over the box to put it back", 3200);
+    }
   }
   function moveDrag(d) {
     let dx = d.x - d.sx;
@@ -5464,7 +6016,15 @@
       if (!lockY) dy += s.dy;
       lines = s.lines.filter((l) => l.x1 === l.x2 ? !lockX : !lockY);
     }
-    for (const s of d.items) applyRect(s, { x: s.rect.x + dx, y: s.rect.y + dy, w: s.rect.w, h: s.rect.h }, false);
+    if (d.pull) pullCheck(d);
+    for (const s of d.items) {
+      if (s.back && !isFree(s.lift)) continue;
+      const r = { x: s.rect.x + dx, y: s.rect.y + dy, w: s.rect.w, h: s.rect.h };
+      if (s.lop && s.lift !== s.it.el && isFree(s.lift)) {
+        moveTo(s.lop, r.x - s.off.x, r.y - s.off.y);
+        requestFull();
+      } else applyRect(s, r, false);
+    }
     app.snapLines = lines;
   }
   function beginEdge(d, hot) {
@@ -5599,8 +6159,9 @@
     for (const s of activeShapes()) if (overlaps(shapeRect(s), m)) found.push(shapeItem(s));
     if (app.state.mode === "change" && !app.state.canvasMode && m.w > 2 && m.h > 2) {
       const inside = /* @__PURE__ */ new Set();
+      const L = minLevel();
       for (const c of app.cands) {
-        if (c.dup || c.w < 2 || c.h < 2) continue;
+        if (c.dup || c.w < 2 || c.h < 2 || c.lv < L) continue;
         if (containsRect(m, c)) inside.add(c);
       }
       for (const c of inside) {
@@ -5644,28 +6205,31 @@
       setSelection([shapeItem(s)]);
       return;
     }
-    if (d.mod && it.kind === "el") return modClick(it, d.shift);
+    if (it.kind === "el") {
+      if (d.alt && d.shift) return pickAlike(it);
+      if (d.alt || d.count >= 2 && !d.shift) return climb(it);
+    }
     if (d.shift) return toggleSelected(it);
     setSelection([it]);
   }
-  function modClick(it, shift) {
-    if (shift) {
-      const base = alikeBase(it.el);
-      const list = alikeOf(base);
-      setSelection(list.map(elItem));
-      hub.toast(
-        list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
-        2600
-      );
-      return;
-    }
+  function pickAlike(it) {
+    const base = alikeBase(it.el);
+    const list = alikeOf(base);
+    setSelection(list.map(elItem));
+    hub.toast(
+      list.length > 1 ? `Picked all ${list.length} like this (${alikeLabel(base)}) — W A S D or drag to change them together` : `Nothing else on the page looks like this (${alikeLabel(base)})`,
+      2600
+    );
+  }
+  function climb(it) {
     const sel = liveSel().filter((s) => s.kind === "el");
     const inside = sel.filter((s) => deepContains(s.el, it.el));
     if (!inside.length) {
       setSelection([it]);
       return;
     }
-    const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el) || s.el);
+    const L = minLevel();
+    const up = (sel.length > 1 ? sel : inside).map((s) => parentPick(s.el, L) || s.el);
     const uniq = [];
     for (const el of up) if (!uniq.includes(el)) uniq.push(el);
     const outer = uniq.filter((el) => !uniq.some((o) => o !== el && deepContains(o, el)));
@@ -5819,8 +6383,10 @@
     const hasSel = editing2 && app.sel.length > 0;
     const d = app.drag;
     setMods(e);
+    if (k === "Alt" && st.mode === "change" && !st.canvasMode) e.preventDefault();
     if (d && (k === "Shift" || k === "Meta" || k === "Control" || k === "Alt")) {
       d.shift = e.shiftKey;
+      d.alt = e.altKey;
       d.mod = e.metaKey || e.ctrlKey;
       if (d.type !== "pending") dragMove(d);
       requestRender();
@@ -5868,6 +6434,9 @@
       } else if (lower === "h") {
         handled = true;
         hub.toggleGuides();
+      } else if (lower === "l") {
+        handled = true;
+        hub.cycleDetail(e.shiftKey ? -1 : 1);
       }
     }
     if (handled) {
@@ -5879,9 +6448,11 @@
   }
   function onKeyUp(e) {
     setMods(e);
+    if (e.key === "Alt" && app.state.open && app.state.mode === "change" && !app.state.canvasMode) e.preventDefault();
     const d = app.drag;
     if (!d) return;
     d.shift = e.shiftKey;
+    d.alt = e.altKey;
     d.mod = e.metaKey || e.ctrlKey;
     if (d.type !== "pending") dragMove(d);
     requestRender();
@@ -5895,7 +6466,7 @@
     }
   }
   function onBlur() {
-    app.mods = { mod: false, shift: false };
+    app.mods = { alt: false, shift: false };
     if (app.drag && app.drag.type !== "pending") {
       const d = app.drag;
       app.drag = null;
@@ -6017,10 +6588,22 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .btn.small:hover { color: #111; }
 .btn .txt { font-size: 10.5px; font-weight: 700; letter-spacing: -.2px; line-height: 1; pointer-events: none; }
 .btn.long .txt { font-size: 8.8px; letter-spacing: -.35px; }
-.btn.guides .i-off { display: none; }
-.btn.guides.off .i-on { display: none; }
-.btn.guides.off .i-off { display: block; }
-.btn.guides.off { color: #9ca3af; }
+/* the eye joined to the detail level: [eye | Blocks] */
+.btn.duo { width: auto; display: flex; align-items: stretch; padding: 0; cursor: default; }
+.btn.duo:hover, .btn.duo:active { background-color: #fff; }
+.duo > .seg {
+  height: 34px; display: grid; place-items: center; color: inherit;
+  transition: background-color .15s, color .15s;
+}
+.duo > .seg.eye { width: 33px; padding-left: 2px; border-radius: 17px 4px 4px 17px; }
+.duo > .seg.lvl { min-width: 46px; padding: 0 12px 0 8px; border-radius: 4px 17px 17px 4px; box-shadow: inset 1px 0 0 rgba(0,0,0,.08); }
+.duo > .seg:hover { background-color: #f3f4f6; }
+.duo > .seg:active { background-color: #e5e7eb; }
+.duo .seg svg { width: 17px; height: 17px; display: block; pointer-events: none; }
+.duo .seg .i-off { display: none; }
+.duo.off .seg .i-on { display: none; }
+.duo.off .seg .i-off { display: block; }
+.duo.off > .seg { color: #9ca3af; }
 
 /* fill strength slider */
 .btn.pill { width: auto; padding: 0 12px 0 12px; display: flex; gap: 7px; align-items: center; cursor: default; }
@@ -6083,7 +6666,11 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .bar.purple.shown > .btn.split:hover, .bar.purple > .btn.split.hold { background-color: transparent; box-shadow: none; }
 .purple .st { background: #7c3aed; color: #fff; }
 .purple .st.no { background: #7c3aed; color: #fecaca; }
-.purple .btn.guides.off { color: #c4b5fd; }
+.purple .btn.duo:hover, .purple .btn.duo:active { background-color: #7c3aed; }
+.purple .duo > .seg:hover { background-color: #6d28d9; }
+.purple .duo > .seg:active { background-color: #5b21b6; }
+.purple .duo > .seg.lvl { box-shadow: inset 1px 0 0 rgba(255,255,255,.2); }
+.purple .duo.off > .seg { color: #c4b5fd; }
 .purple .split.dim > .half.l { color: #c4b5fd; }
 
 /* small icon buttons used in flyouts and panels */
@@ -6179,8 +6766,8 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 `;
 
   // src/content/index.js
-  var VERSION = "0.2.0";
-  var BUILD = true ? "d622bdeec66b" : VERSION;
+  var VERSION = "1.0.0";
+  var BUILD = true ? "e7c6a5bd947b" : VERSION;
   var mo = null;
   var timers = [];
   var closeTimer = 0;
@@ -6339,6 +6926,7 @@ button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
     clearTimeout(closeTimer);
     if (!app.host) build();
     if (!app.host.isConnected) (document.documentElement || document.body).appendChild(app.host);
+    if (hasFree()) raiseHost();
     const wasClosing = st.closing;
     st.open = true;
     st.closing = false;

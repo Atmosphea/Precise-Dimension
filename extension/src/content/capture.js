@@ -7,8 +7,8 @@
 // buttons show up once, and pages that scroll a panel instead of the page itself (most web
 // apps) get that panel stretched out to its full length.
 import { app, requestRender, requestFull } from './app.js';
-import { frames, sleep, deepContains, isOurs, parentOf } from './util.js';
-import { getRec } from './edits.js';
+import { frames, sleep, deepContains, isOurs, parentOf, unsetStyle } from './util.js';
+import { getRec, freeEls } from './edits.js';
 import { PngWriter } from './png.js';
 
 const GAP = 560; // Chrome allows about two captures a second
@@ -170,14 +170,14 @@ class Saver {
     this.list = [];
   }
   set(el, prop, val) {
-    this.list.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)]);
+    this.list.push([el, prop, el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop), el.hasAttribute('style')]);
     el.style.setProperty(prop, val, 'important');
   }
   restore() {
     for (let i = this.list.length - 1; i >= 0; i--) {
-      const [el, p, v, pr] = this.list[i];
+      const [el, p, v, pr, had] = this.list[i];
       if (v) el.style.setProperty(p, v, pr);
-      else el.style.removeProperty(p);
+      else unsetStyle(el, p, had);
     }
     this.list = [];
   }
@@ -273,14 +273,14 @@ function classifyFixed(list) {
 
 class Hider {
   constructor(items) {
-    this.items = items.map((it) => ({ ...it, v: it.el.style.getPropertyValue('visibility'), p: it.el.style.getPropertyPriority('visibility'), off: false }));
+    this.items = items.map((it) => ({ ...it, v: it.el.style.getPropertyValue('visibility'), p: it.el.style.getPropertyPriority('visibility'), had: it.el.hasAttribute('style'), off: false }));
   }
   set(it, off) {
     if (it.off === off) return;
     it.off = off;
     if (off) it.el.style.setProperty('visibility', 'hidden', 'important');
     else if (it.v) it.el.style.setProperty('visibility', it.v, it.p);
-    else it.el.style.removeProperty('visibility');
+    else unsetStyle(it.el, 'visibility', it.had);
   }
   // which: 'all' | 'first' | 'last' | 'none'
   show(which) {
@@ -582,7 +582,8 @@ export async function captureFull(hud = NOHUD) {
     sc.to(0);
     await frames(2);
     await sleep(150);
-    hider = new Hider(classifyFixed(pos.fixed));
+    // when only a panel scrolls, things you pulled out stay put on screen like fixed bars do
+    hider = new Hider(classifyFixed(sc.kind === 'el' ? pos.fixed.concat(freeEls()) : pos.fixed));
     const view = sc.view();
     const H = Math.min(sc.height(), MAX_CSS_H);
     const maxTop = Math.max(0, H - view.h);

@@ -28,7 +28,7 @@ await page.bringToFront();
 const world = await pdWorld(page);
 await ext.triggerAction(page);
 await sleep(2300);
-await world.eval(`(() => { const A = __PD__.app; A.state.unit = 'vw/vh'; A.state.fill = 0.08; A.state.guides = true; __PD__.hub.sync(); __PD__.requestFull(); })()`);
+await world.eval(`(() => { const A = __PD__.app; A.state.unit = 'vw/vh'; A.state.fill = 0.08; A.state.guides = true; A.state.detail = 'all'; __PD__.hub.sync(); __PD__.requestFull(); })()`);
 await sleep(200);
 
 // 1. every box measured, one hovered
@@ -50,19 +50,19 @@ await page.mouse.move(start.x, start.y, { steps: 8 });
 await sleep(500);
 await shot(page, 'screenshot-2-change.png');
 
-// 3. Ctrl+Shift held over a feature card: every card like it lights up
+// 3. Alt+Shift held over a feature card: every card like it lights up
 await page.keyboard.press('Escape');
 await sleep(200);
 const feat = await rectOfPage(page, '.feature');
 await page.mouse.move(feat.x + feat.w * 0.75, feat.y + feat.h * 0.3, { steps: 6 });
 await sleep(200);
-await page.keyboard.down('Control');
+await page.keyboard.down('Alt');
 await page.keyboard.down('Shift');
 await page.mouse.move(feat.x + feat.w * 0.75 + 2, feat.y + feat.h * 0.3 + 1, { steps: 2 });
 await sleep(500);
 await shot(page, 'screenshot-3-alike.png');
 await page.keyboard.up('Shift');
-await page.keyboard.up('Control');
+await page.keyboard.up('Alt');
 await backToMeasure(world, page);
 await sleep(600);
 

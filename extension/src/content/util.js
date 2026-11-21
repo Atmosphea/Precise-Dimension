@@ -104,12 +104,43 @@ export function parentOf(el) {
 }
 
 // The nearest box around an element that actually looks different (skips same-size wrappers).
-export function parentPick(el) {
+// Our slide animations (things moving over to close or open a gap). Measuring something while it
+// slides gives a spot it's only passing through, so they're finished first.
+export const flips = new Set();
+export function settleFlips() {
+  for (const a of flips) {
+    try {
+      a.finish();
+    } catch {}
+  }
+  flips.clear();
+}
+
+// Removes an element's inline style completely. Chrome writes script-made styles into the style
+// attribute lazily, and removing an attribute that was never written leaves an empty style=""
+// behind, so it's read once first.
+export function dropStyle(el) {
+  el.getAttribute('style');
+  el.removeAttribute('style');
+}
+
+// Removes one inline style property, and the whole style attribute if the element had none to
+// begin with and nothing else is left in it.
+export function unsetStyle(el, prop, hadStyle) {
+  el.style.removeProperty(prop);
+  if (!hadStyle && !el.style.length) dropStyle(el);
+}
+
+// min = the detail level: at "Blocks" or "Sections", boxes below that level are skipped.
+export function parentPick(el, min = 0) {
   const r = rectOf(el);
   let p = parentOf(el);
   while (p && !isRootish(p)) {
     const pr = rectOf(p);
-    if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) return p;
+    if (!sameRect(pr, r, 0.6) && pr.w >= 2 && pr.h >= 2) {
+      const c = min ? app.candByEl.get(p) : null;
+      if (!c || c.dup || c.lv >= min) return p;
+    }
     p = parentOf(p);
   }
   return null;
@@ -236,6 +267,32 @@ export function selectorFor(el) {
     cur = cur.parentElement;
   }
   return parts.join(' > ');
+}
+
+// How see-through a computed colour is (0 = invisible, 1 = solid).
+export function alphaOf(c) {
+  if (!c || c === 'transparent') return 0;
+  let m = /\/\s*([\d.]+)(%?)\s*\)\s*$/.exec(c);
+  if (m) return parseFloat(m[1]) * (m[2] ? 0.01 : 1);
+  m = /^rgba\(([^)]+)\)/.exec(c);
+  if (m) {
+    const parts = m[1].split(/[\s,]+/).filter(Boolean);
+    if (parts.length >= 4) return parseFloat(parts[3]) * (parts[3].endsWith('%') ? 0.01 : 1);
+  }
+  return 1;
+}
+
+const SIDES = ['Top', 'Right', 'Bottom', 'Left'];
+// Whether a box shows up by itself on the page: a background, a border or a shadow.
+export function hasPaint(cs) {
+  if (cs.backgroundImage && cs.backgroundImage !== 'none') return true;
+  if (alphaOf(cs.backgroundColor) > 0.05) return true;
+  if (cs.boxShadow && cs.boxShadow !== 'none') return true;
+  for (const s of SIDES) {
+    const st = cs['border' + s + 'Style'];
+    if (st !== 'none' && st !== 'hidden' && parseFloat(cs['border' + s + 'Width']) > 0 && alphaOf(cs['border' + s + 'Color']) > 0.05) return true;
+  }
+  return false;
 }
 
 export function cssPx(v) {

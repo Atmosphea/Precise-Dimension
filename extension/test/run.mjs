@@ -58,7 +58,7 @@ async function setup(target = url, { width = 1280, height = 800, dpr = 1, before
   await ext.triggerAction(page);
   await sleep(1900);
   // start every scenario from the default settings
-  await world.eval(`(() => { const A = __PD__.app; A.state.unit = 'vw/vh'; A.state.fill = 0.08; A.state.guides = true; __PD__.hub.sync(); __PD__.requestFull(); })()`);
+  await world.eval(`(() => { const A = __PD__.app; A.state.unit = 'vw/vh'; A.state.fill = 0.08; A.state.guides = true; A.state.detail = 'all'; __PD__.hub.sync(); __PD__.requestFull(); })()`);
   await sleep(100);
   return { page, world, logs };
 }
@@ -125,7 +125,7 @@ async function measureScenario() {
   await sleep(100);
 
   // guides toggle
-  await clickUI(page, '.bar.white .btn.guides');
+  await clickUI(page, '.bar.white .duo .seg.eye');
   await sleep(200);
   check('guides toggle off', (await S(world, `return A.state.guides;`)) === false);
   await page.mouse.move(640, 500);
@@ -319,11 +319,12 @@ async function changeScenario() {
   check('click selects the element', sel.length === 1 && sel[0] === 'Start free', JSON.stringify(sel));
   await shot(page, 'change-3-selected');
 
-  // move like Photoshop (⌘ held = no snapping), neighbours stay put
-  await drag(page, o.a.x + o.a.w / 2, o.a.y + o.a.h / 2, o.a.x + o.a.w / 2 + 60, o.a.y + o.a.h / 2 + 40, { meta: true });
+  // move like Photoshop (⌘ held = no snapping), neighbours stay put. The move stays inside the
+  // row of buttons: dragging it out of the row is the pull scenario's job.
+  await drag(page, o.a.x + o.a.w / 2, o.a.y + o.a.h / 2, o.a.x + o.a.w / 2 + 60, o.a.y + o.a.h / 2 + 16, { meta: true });
   await sleep(200);
   let n = await R(page);
-  check('drag moves the element', near(n.a.x, o.a.x + 60) && near(n.a.y, o.a.y + 40), `${(n.a.x - o.a.x).toFixed(1)}, ${(n.a.y - o.a.y).toFixed(1)}`);
+  check('drag moves the element', near(n.a.x, o.a.x + 60) && near(n.a.y, o.a.y + 16), `${(n.a.x - o.a.x).toFixed(1)}, ${(n.a.y - o.a.y).toFixed(1)}`);
   check('moving leaves neighbours alone', same(n.b, o.b) && same(n.cta, o.cta) && same(n.p, o.p));
   await shot(page, 'change-4-moved');
 
@@ -728,9 +729,9 @@ async function denseScenario() {
     return { x: r.left, y: r.top, w: r.width, h: r.height };
   }, i);
   for (let i = 0; i < 2; i++) {
-    await page.keyboard.down('Control');
+    await page.keyboard.down('Alt');
     await page.mouse.click(tag.x + tag.w / 2, tag.y + tag.h / 2);
-    await page.keyboard.up('Control');
+    await page.keyboard.up('Alt');
     await sleep(180);
   }
   const picked = await S(world, `return A.sel.map((s) => s.el.className).join(',');`);
@@ -758,7 +759,11 @@ async function denseScenario() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Ctrl-click climbs one level at a time; Ctrl+Shift-click picks everything like it.
+// Alt-click (Option on a Mac), or clicking again quickly, climbs one box at a time;
+// Alt+Shift-click picks everything like it.
+
+// Long enough that the next click counts as a click of its own, not part of a double-click.
+const apart = () => sleep(560);
 
 async function climbScenario() {
   const { page, world, logs } = await setup();
@@ -774,37 +779,115 @@ async function climbScenario() {
     for (const m of mods.slice().reverse()) await page.keyboard.up(m);
     await sleep(180);
   };
-  await modClick(cx, cy, ['Control']);
+  await modClick(cx, cy, ['Alt']);
   const s1 = await sel();
-  await modClick(cx, cy, ['Control']);
+  await modClick(cx, cy, ['Alt']);
   const s2 = await sel();
   await shot(page, 'climb-1-card');
-  await modClick(cx, cy, ['Control']);
+  await modClick(cx, cy, ['Alt']);
   const s3 = await sel();
-  check('Ctrl-click picks the icon, then its card, then the row of cards', s1 === 'icon' && s2 === 'feature' && s3 === 'features', `${s1} → ${s2} → ${s3}`);
+  check('Alt-click picks the icon, then its card, then the row of cards', s1 === 'icon' && s2 === 'feature' && s3 === 'features', `${s1} → ${s2} → ${s3}`);
+  await apart();
   await page.mouse.click(cx, cy);
-  await sleep(150);
+  await apart();
   const p1 = await sel();
   await page.mouse.click(cx, cy);
-  await sleep(150);
+  await apart();
   const p2 = await sel();
   check('a plain click picks the thing under the mouse and stays on it', p1 === 'icon' && p2 === 'icon', `${p1}, ${p2}`);
-  await page.keyboard.down('Control');
+
+  // double, triple and quadruple clicks: one box further out with every extra click
+  const sb = await rectOfPage(page, '.hero .btn');
+  const bx = sb.x + sb.w / 2;
+  const by = sb.y + sb.h / 2;
+  const multi = [];
+  for (const n of [1, 2, 3, 4]) {
+    await key(page, 'Escape');
+    await apart();
+    await page.mouse.click(bx, by, { count: n });
+    await sleep(150);
+    multi.push(await sel());
+  }
+  check('click, double, triple, quadruple click: the button, its row, its column, the whole hero', multi.join(' → ') === 'btn → cta → div → hero', multi.join(' → '));
+  await shot(page, 'climb-2-quadruple-click');
+
+  // click, then drag straight away: the drag moves what you clicked, never the box around it
+  await key(page, 'Escape');
+  await apart();
+  const row0 = await rectOfPage(page, '.hero .cta');
+  const btn0 = await rectOfPage(page, '.hero .btn');
+  await page.mouse.click(bx, by);
+  await sleep(90);
+  await drag(page, bx, by, bx + 30, by - 12, { meta: true });
+  await sleep(200);
+  const row1 = await rectOfPage(page, '.hero .cta');
+  const btn1 = await rectOfPage(page, '.hero .btn');
+  const dsel = await sel();
+  check('click and then drag at once moves what you clicked', dsel === 'btn' && near(btn1.x - btn0.x, 30, 1) && near(btn1.y - btn0.y, -12, 1) && same(row1, row0), JSON.stringify({ dsel, dx: btn1.x - btn0.x, dy: btn1.y - btn0.y }));
+  await key(page, 'z', ['Meta']);
+  await key(page, 'Escape');
+  await apart();
+
+  // a link that wraps onto two lines: a drag from inside its outline, on a spot where the page
+  // reports the paragraph around it rather than the link, still moves the link
+  const wrap = await page.evaluate(() => {
+    const p = document.createElement('p');
+    p.className = 'wrapP';
+    p.style.cssText = 'position:absolute;left:720px;top:500px;width:150px;margin:0;font:16px/24px sans-serif;color:#222;background:#fff;z-index:60';
+    p.innerHTML = 'Some words <a class="wrapA" href="#" onclick="return false">and a link that wraps</a> on.';
+    document.body.appendChild(p);
+    const a = p.querySelector('a');
+    const parts = [...a.getClientRects()];
+    const r = a.getBoundingClientRect();
+    const f = parts[0];
+    const gx = r.left + 24;
+    const gy = f.top + f.height / 2;
+    const under = document.elementsFromPoint(gx, gy).find((e) => e.tagName !== 'PRECISE-DIMENSION');
+    return { lines: parts.length, fx: f.left + f.width / 2, fy: f.top + f.height / 2, gx, gy, under: under && under.className };
+  });
+  await sleep(700);
+  await page.mouse.click(wrap.fx, wrap.fy);
+  await sleep(120);
+  const wsel = await sel();
+  await apart();
+  await page.mouse.move(wrap.gx, wrap.gy, { steps: 3 });
+  await sleep(150);
+  const whot = await S(world, `return A.hot ? A.hot.type : null;`);
+  const wa0 = await rectOfPage(page, '.wrapA');
+  const wp0 = await rectOfPage(page, '.wrapP');
+  await drag(page, wrap.gx, wrap.gy, wrap.gx + 16, wrap.gy + 6, { meta: true });
+  await sleep(200);
+  const wa1 = await rectOfPage(page, '.wrapA');
+  const wp1 = await rectOfPage(page, '.wrapP');
+  const wsel2 = await sel();
+  check(
+    'a drag from inside a picked link that wraps onto two lines moves the link, not its paragraph',
+    wrap.lines === 2 && wrap.under === 'wrapP' && !whot && wsel === 'wrapA' && wsel2 === 'wrapA' && near(wa1.x - wa0.x, 16, 1) && near(wa1.y - wa0.y, 6, 1) && same(wp1, wp0),
+    JSON.stringify({ lines: wrap.lines, under: wrap.under, hot: whot, wsel, wsel2, dx: wa1.x - wa0.x, dy: wa1.y - wa0.y }),
+  );
+  await key(page, 'z', ['Meta']);
+  await key(page, 'Escape');
+  await page.evaluate(() => document.querySelector('.wrapP').remove());
+  await apart();
+
+  await page.mouse.click(cx, cy);
+  await apart();
+  await page.keyboard.down('Alt');
   await page.mouse.move(cx + 1, cy + 1);
   await sleep(250);
   const mods = await S(world, `return A.mods;`);
-  await shot(page, 'climb-2-ctrl-preview');
+  await shot(page, 'climb-3-alt-preview');
   await page.keyboard.down('Shift');
   await page.mouse.move(cx + 2, cy + 2);
   await sleep(250);
-  await shot(page, 'climb-3-ctrl-shift-preview');
+  await shot(page, 'climb-4-alt-shift-preview');
   await page.keyboard.up('Shift');
-  await page.keyboard.up('Control');
-  check('holding Ctrl previews what a click would pick', mods && mods.mod === true, JSON.stringify(mods));
-  await modClick(cx, cy, ['Control', 'Shift']);
+  await page.keyboard.up('Alt');
+  check('holding Alt previews what a click would pick', mods && mods.alt === true, JSON.stringify(mods));
+  await modClick(cx, cy, ['Alt', 'Shift']);
   const s4 = await sel();
-  check('Ctrl+Shift-click picks every icon like it', s4 === 'icon,icon,icon', s4);
-  await shot(page, 'climb-4-alike');
+  check('Alt+Shift-click picks every icon like it', s4 === 'icon,icon,icon', s4);
+  await shot(page, 'climb-5-alike');
   const widths = () => page.evaluate(() => [...document.querySelectorAll('.feature .icon')].map((e) => e.getBoundingClientRect().width));
   const w0 = await widths();
   await key(page, 'd');
@@ -813,23 +896,337 @@ async function climbScenario() {
   check('W A S D change all of them together', w1.every((w, i) => near(w, w0[i] * 1.1025, 1.5)), `${w0.join('/')} → ${w1.join('/')}`);
   await key(page, 'z', ['Meta']);
   await key(page, 'z', ['Meta']);
-  await modClick(cx, cy, ['Control']);
+  // a small drag of all three moves them inside their own cards: none jumps out of its card
+  const outs = () => page.evaluate(() => [...document.querySelectorAll('.feature .icon')].map((e) => e.matches(':popover-open')).join(','));
+  await drag(page, cx, cy, cx + 20, cy + 10, { meta: true });
+  await sleep(200);
+  const o1 = await outs();
+  const moved3 = await page.evaluate(() => [...document.querySelectorAll('.feature .icon')].map((e) => Math.round(e.getBoundingClientRect().x)).join(','));
+  await key(page, 'z', ['Meta']);
+  await sleep(200);
+  check('a small drag of several picked things keeps each in its own box', o1 === 'false,false,false', `${o1} at ${moved3}`);
+  await apart();
+  await modClick(cx, cy, ['Alt']);
   const s5 = await sel();
-  check('Ctrl-click with several picked climbs all of them', s5 === 'feature,feature,feature', s5);
+  check('Alt-click with several picked climbs all of them', s5 === 'feature,feature,feature', s5);
   await key(page, 'Escape');
+  await apart();
   const sf = await rectOfPage(page, '.cta .btn');
-  await modClick(sf.x + sf.w / 2, sf.y + sf.h / 2, ['Control', 'Shift']);
+  await modClick(sf.x + sf.w / 2, sf.y + sf.h / 2, ['Alt', 'Shift']);
   const s6 = await S(world, `return A.sel.map((s) => s.el.textContent.trim()).join('|');`);
-  check('Ctrl+Shift-click on a button picks every .btn', s6 === 'Get started|Start free|Book a demo', s6);
+  check('Alt+Shift-click on a button picks every .btn', s6 === 'Get started|Start free|Book a demo', s6);
   await key(page, 'Escape');
+  await apart();
+  // Ctrl and ⌘ clicks are plain clicks now (on a Mac, Control-click also opens the page's menu)
   await modClick(cx, cy, ['Meta']);
+  await apart();
   const m1 = await sel();
-  await modClick(cx, cy, ['Meta']);
+  await modClick(cx, cy, ['Control']);
+  await apart();
   const m2 = await sel();
-  check('⌘-click works the same way', m1 === 'icon' && m2 === 'feature', `${m1} → ${m2}`);
-  check('still in change mode after Control-clicks (no menu got in the way)', (await S(world, `return A.state.mode;`)) === 'change');
+  check('Ctrl-click and ⌘-click are plain clicks now', m1 === 'icon' && m2 === 'icon', `${m1}, ${m2}`);
+  check('still in change mode after all those clicks (no menu got in the way)', (await S(world, `return A.state.mode;`)) === 'change');
   const errs = ourErrors(world, logs);
   check('no errors (climb)', !errs.length, errs.join(' | '));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Detail levels: every box / just the blocks / just the big sections, from the level half of the
+// eye pill or the L key. Hover, clicks and climbing follow the level.
+
+const levelCount = `const n = [0, 0, 0]; for (const c of A.cands) if (!c.dup) n[c.lv]++; return n;`;
+
+async function detailScenario() {
+  const { page, world, logs } = await setup();
+  const secs = await S(world, `return A.cands.filter((c) => !c.dup && c.lv === 2).map((c) => c.el.className || c.tag).join(',');`);
+  check('Sections finds the big parts of the page', secs === 'header,hero,features,team,scroller,pricing,footer', secs);
+  const n = await S(world, levelCount);
+  check('words, blocks and sections are all there', n[0] > 5 && n[1] > 5 && n[2] === 7, JSON.stringify(n));
+  const h1 = await rectOfPage(page, '.hero h1');
+  const hoverAt = async (x, y) => {
+    await page.mouse.move(x, y, { steps: 3 });
+    await sleep(250);
+    return S(world, `return A.hover && A.hover.el ? (A.hover.el.className || A.hover.el.tagName.toLowerCase()) : null;`);
+  };
+  const drawn = () => S(world, `return A.drawn;`);
+  const label = () => page.evaluate(() => document.querySelector('precise-dimension').shadowRoot.querySelector('.bar.white .duo .lvl').textContent);
+  const hAll = await hoverAt(h1.x + 40, h1.y + 20);
+  const nAll = await drawn();
+  await clickUI(page, '.bar.white .duo .seg.lvl');
+  await sleep(450);
+  const d1 = await S(world, `return A.state.detail;`);
+  const l1 = await label();
+  const hBlocks = await hoverAt(h1.x + 41, h1.y + 21);
+  const nBlocks = await drawn();
+  await shot(page, 'detail-1-blocks');
+  await key(page, 'l');
+  await sleep(450);
+  const d2 = await S(world, `return A.state.detail;`);
+  const l2 = await label();
+  const hSec = await hoverAt(h1.x + 42, h1.y + 22);
+  const nSec = await drawn();
+  await shot(page, 'detail-2-sections');
+  check('the level button and L step All → Blocks → Sections', d1 === 'blocks' && d2 === 'sections' && l1 === 'Blocks' && l2 === 'Sections', `${d1}/${l1}, ${d2}/${l2}`);
+  check('fewer boxes at each level', nAll > nBlocks && nBlocks > nSec && nSec >= 2, `${nAll} → ${nBlocks} → ${nSec}`);
+  check('hover follows the level: the heading, then its column, then the hero', hAll === 'h1' && hBlocks === 'div' && hSec === 'hero', `${hAll}, ${hBlocks}, ${hSec}`);
+  await key(page, 'l', ['Shift']);
+  const back = await S(world, `return A.state.detail;`);
+  await key(page, 'l');
+  await key(page, 'l');
+  const wrap = await S(world, `return A.state.detail;`);
+  check('Shift+L goes back a level, and L wraps around to All', back === 'blocks' && wrap === 'all', `${back}, ${wrap}`);
+
+  // H hides every guide; the level half then shows them again at the same level
+  await key(page, 'h');
+  await sleep(300);
+  const off = await page.evaluate(() => document.querySelector('precise-dimension').shadowRoot.querySelector('.bar.white .duo').classList.contains('off'));
+  const offG = await S(world, `return A.state.guides;`);
+  await shot(page, 'detail-3-hidden');
+  await clickUI(page, '.bar.white .duo .seg.lvl');
+  await sleep(300);
+  const on = await S(world, `return { g: A.state.guides, d: A.state.detail };`);
+  check('H hides all guides; the level button brings them back', off && offG === false && on.g === true && on.d === 'all', JSON.stringify({ off, offG, on }));
+  await clickUI(page, '.bar.white .duo .seg.eye');
+  await sleep(200);
+  const eyeOff = await S(world, `return A.state.guides;`);
+  await clickUI(page, '.bar.white .duo .seg.eye');
+  await sleep(200);
+  check('the eye half hides and shows them', eyeOff === false && (await S(world, `return A.state.guides;`)) === true);
+
+  // change mode follows the level too
+  await key(page, 'l');
+  await key(page, 'l');
+  await clickUI(page, '.btn.change');
+  await sleep(900);
+  const sel = () => S(world, `return A.sel.map((s) => s.el.className || s.el.tagName.toLowerCase()).join(',');`);
+  const ic = await rectOfPage(page, '.feature .icon');
+  await page.mouse.click(ic.x + ic.w / 2, ic.y + ic.h / 2);
+  await apart();
+  const c1 = await sel();
+  await page.mouse.click(ic.x + ic.w / 2, ic.y + ic.h / 2, { count: 2 });
+  await apart();
+  const c2 = await sel();
+  await shot(page, 'detail-4-change-sections');
+  check('at Sections a click picks the whole section', c1 === 'features' && c2 === 'features', `${c1}, ${c2}`);
+  await key(page, 'Escape');
+  await key(page, 'l');
+  await key(page, 'l');
+  await apart();
+  await page.mouse.click(h1.x + 40, h1.y + 20);
+  await apart();
+  const c3 = await sel();
+  await page.keyboard.down('Alt');
+  await page.mouse.click(h1.x + 40, h1.y + 20);
+  await page.keyboard.up('Alt');
+  await apart();
+  const c4 = await sel();
+  check('at Blocks a click picks the column, Alt-click the section around it', c3 === 'div' && c4 === 'hero', `${c3}, ${c4}`);
+  const saved = await S(world, `return new Promise((r) => chrome.storage.local.get('pd_prefs', (v) => r(v && v.pd_prefs && v.pd_prefs.detail)));`);
+  check('the level is remembered for next time', saved === 'blocks', String(saved));
+  const errs = ourErrors(world, logs);
+  check('no errors (detail)', !errs.length, errs.join(' | '));
+  await page.close();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dragging things out of the box they sit in: a link out of a sticky header that cuts off what
+// spills out, a tag out of a sideways-scrolling strip, a button out of a card with clipped
+// corners. The rest close the gap; dropping it back over its box puts it back.
+
+async function pullScenario() {
+  const { page, world, logs } = await setup(url + 'pull.html');
+  await browser.defaultBrowserContext().overridePermissions(new URL(url).origin, ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write']);
+  await clickUI(page, '.btn.change');
+  await sleep(900);
+  const R = (sel, i = 0) =>
+    page.evaluate(
+      (sel, i) => {
+        const r = document.querySelectorAll(sel)[i].getBoundingClientRect();
+        return { x: r.left, y: r.top, w: r.width, h: r.height };
+      },
+      sel,
+      i,
+    );
+  // where it is, whether it's out of its box, and whether it's really the thing on top there
+  const state = (sel, i = 0) =>
+    page.evaluate(
+      (sel, i) => {
+        const el = document.querySelectorAll(sel)[i];
+        const r = el.getBoundingClientRect();
+        const host = document.querySelector('precise-dimension');
+        const hits = document.elementsFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        const first = hits.find((e) => e !== host);
+        return {
+          x: r.left,
+          y: r.top,
+          w: r.width,
+          h: r.height,
+          out: !!el.closest(':popover-open'),
+          top: !!first && (first === el || el.contains(first)),
+          hostTop: !!host && hits[0] === host,
+          hostOpen: !!host && host.matches(':popover-open'),
+        };
+      },
+      sel,
+      i,
+    );
+  const r1 = (v) => Math.round(v * 10) / 10;
+
+  // 1. a link out of the sticky header (the header cuts off anything that spills out of it)
+  const a0 = await state('.menu a', 1);
+  const menu0 = await R('.menu');
+  const li0 = await R('.menu li', 1);
+  const ax = a0.x + a0.w / 2;
+  const ay = a0.y + a0.h / 2;
+  await drag(page, ax, ay, 640, 330, { meta: true, steps: 20 });
+  await sleep(450);
+  const a1 = await state('.menu a', 1);
+  const menu1 = await R('.menu');
+  await shot(page, 'pull-1-out-of-header');
+  check('a link dragged out of a clipped sticky header comes out, on top', a1.out && a1.top, JSON.stringify(a1));
+  check('it lands right where it was dropped, the same size', near(a1.x - a0.x, 640 - ax, 1) && near(a1.y - a0.y, 330 - ay, 1) && near(a1.w, a0.w, 0.5) && near(a1.h, a0.h, 0.5), `moved ${r1(a1.x - a0.x)}, ${r1(a1.y - a0.y)}; ${r1(a1.w)}×${r1(a1.h)}`);
+  check('the menu closes the gap behind it', near(menu0.w - menu1.w, li0.w + 8, 1.5), `${r1(menu0.w)} → ${r1(menu1.w)}`);
+  check('the guides and toolbar stay above it', a1.hostTop && a1.hostOpen, JSON.stringify({ hostTop: a1.hostTop, hostOpen: a1.hostOpen }));
+  // and it's really painted there: its crimson text shows on screen
+  await key(page, 'Escape');
+  await page.mouse.move(1100, 700);
+  await sleep(350);
+  const png = decodePng(await page.screenshot());
+  let red = 0;
+  for (let y = Math.ceil(a1.y); y < a1.y + a1.h - 1; y++) {
+    for (let x = Math.ceil(a1.x); x < a1.x + a1.w - 1; x++) {
+      const [r, g, b] = png.at(x, y);
+      if (r > 140 && g < 110 && b < 130 && r - g > 70) red++;
+    }
+  }
+  check('you can see it where you dropped it', red > 40, `${red} crimson pixels`);
+
+  // 2. undo puts it back in the menu; redo takes it out again
+  await key(page, 'z', ['Meta']);
+  await sleep(450);
+  const u = await state('.menu a', 1);
+  const menuU = await R('.menu');
+  await key(page, 'z', ['Meta', 'Shift']);
+  await sleep(450);
+  const rd = await state('.menu a', 1);
+  check('undo puts it back in the menu, redo takes it out again', !u.out && near(u.x, a0.x, 0.5) && near(u.y, a0.y, 0.5) && near(menuU.w, menu0.w, 0.5) && rd.out && near(rd.x, a1.x, 0.5) && near(rd.y, a1.y, 0.5), JSON.stringify({ u: [u.out, r1(u.x), r1(u.y)], rd: [rd.out, r1(rd.x), r1(rd.y)] }));
+
+  // 3. a tag out of a sideways-scrolling strip; Esc halfway through cancels
+  const t0 = await state('.tag', 1);
+  const g0 = await R('.tag', 2);
+  await page.keyboard.down('Meta');
+  await page.mouse.move(t0.x + t0.w / 2, t0.y + t0.h / 2);
+  await page.mouse.down();
+  await page.mouse.move(t0.x + t0.w / 2 + 20, t0.y + 30, { steps: 4 });
+  await page.mouse.move(820, 300, { steps: 12 });
+  await sleep(150);
+  const mid = await state('.tag', 1);
+  await page.keyboard.up('Meta');
+  await key(page, 'Escape');
+  await page.mouse.up();
+  await sleep(450);
+  const t1 = await state('.tag', 1);
+  const g1 = await R('.tag', 2);
+  check('Esc in the middle of a drag puts it back where it was', mid.out && !t1.out && near(t1.x, t0.x, 0.5) && near(t1.y, t0.y, 0.5) && near(g1.x, g0.x, 0.5), JSON.stringify({ mid: mid.out, t1: [t1.out, r1(t1.x), r1(t1.y)], g: [r1(g0.x), r1(g1.x)] }));
+  await drag(page, t0.x + t0.w / 2, t0.y + t0.h / 2, 820, 300, { meta: true, steps: 20 });
+  await sleep(450);
+  const t2 = await state('.tag', 1);
+  const g2 = await R('.tag', 2);
+  check('a tag dragged out of a scrolling strip comes out, and the strip closes up', t2.out && t2.top && near(g0.x - g2.x, t0.w + 10, 1.5), JSON.stringify({ out: t2.out, top: t2.top, shift: r1(g0.x - g2.x), want: r1(t0.w + 10) }));
+
+  // back over its box and out again in one drag: it waits in its spot, then follows the mouse out
+  const strip = await R('.strip');
+  await page.keyboard.down('Meta');
+  await page.mouse.move(t2.x + t2.w / 2, t2.y + t2.h / 2);
+  await page.mouse.down();
+  await page.mouse.move(strip.x + strip.w * 0.6, strip.y + strip.h / 2, { steps: 14 });
+  await sleep(450);
+  const inBox = await state('.tag', 1);
+  await page.mouse.move(900, 420, { steps: 14 });
+  await sleep(120);
+  await page.mouse.up();
+  await page.keyboard.up('Meta');
+  await sleep(450);
+  const t4 = await state('.tag', 1);
+  check('over its box it waits in its own spot; dragged on, it comes out again with the mouse', !inBox.out && near(inBox.x, t0.x, 0.5) && near(inBox.y, t0.y, 0.5) && t4.out && near(t4.x + t4.w / 2, 900, 1.5) && near(t4.y + t4.h / 2, 420, 1.5), JSON.stringify({ inBox: [inBox.out, r1(inBox.x), r1(inBox.y)], t4: [t4.out, r1(t4.x + t4.w / 2), r1(t4.y + t4.h / 2)] }));
+
+  // 4. a button out of a card with clipped corners keeps its look
+  const b0 = await state('.card .cta');
+  const look = () =>
+    page.evaluate(() => {
+      const cs = getComputedStyle(document.querySelector('.card .cta'));
+      return [cs.backgroundColor, cs.color, cs.borderTopLeftRadius, cs.fontSize, cs.paddingLeft].join(' ');
+    });
+  const look0 = await look();
+  await drag(page, b0.x + b0.w / 2, b0.y + b0.h / 2, 760, 520, { meta: true, steps: 20 });
+  await sleep(450);
+  const b1 = await state('.card .cta');
+  const look1 = await look();
+  check('a button dragged out of a clipped card comes out looking the same', b1.out && b1.top && look1 === look0 && near(b1.w, b0.w, 0.5) && near(b1.h, b0.h, 0.5), `${look0} → ${look1}`);
+  await shot(page, 'pull-2-three-out');
+  // resize it while it's out
+  await key(page, 'd');
+  await sleep(250);
+  const b2 = await state('.card .cta');
+  check('it can be resized while it is out', b2.out && near(b2.w, Math.round(b1.w * 1.05), 1) && near(b2.x, b1.x, 1) && near(b2.y, b1.y, 1), `${r1(b1.w)} → ${r1(b2.w)}`);
+  // it scrolls with the page
+  await page.evaluate(() => window.scrollTo(0, 150));
+  await sleep(400);
+  const b3 = await state('.card .cta');
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await sleep(400);
+  check('it scrolls along with the page', near(b3.y, b2.y - 150, 1), `${r1(b2.y)} → ${r1(b3.y)}`);
+
+  // 5. dropping it back over its box puts it back in (the menu opens up again)
+  const a3 = await state('.menu a', 1);
+  const mb = await R('.menu');
+  await drag(page, a3.x + a3.w / 2, a3.y + a3.h / 2, mb.x + mb.w / 2, mb.y + mb.h / 2, { meta: true, steps: 20 });
+  await sleep(450);
+  const a4 = await state('.menu a', 1);
+  const menu4 = await R('.menu');
+  await shot(page, 'pull-3-back-in');
+  check('dropping it back over the menu slots it back into its own spot', !a4.out && near(menu4.w, menu0.w, 1) && near(a4.x, a0.x, 0.5) && near(a4.y, a0.y, 0.5), JSON.stringify({ out: a4.out, w: [r1(menu0.w), r1(menu4.w)], at: [r1(a4.x), r1(a4.y)], was: [r1(a0.x), r1(a0.y)] }));
+  await key(page, 'z', ['Meta']);
+  await sleep(450);
+  const a5 = await state('.menu a', 1);
+  check('undo takes it back out', a5.out && near(a5.x, a3.x, 0.5) && near(a5.y, a3.y, 0.5), JSON.stringify([a5.out, r1(a5.x), r1(a5.y)]));
+
+  // 6. the copied edits say in words what happened
+  await clickUI(page, '.bar.purple .btn.text');
+  await sleep(600);
+  const text = await page.evaluate(() => navigator.clipboard.readText()).catch((e) => 'ERR ' + e.message);
+  const outs = (text.match(/take it out of/g) || []).length;
+  check('copied edits say what was taken out of which box, and where it went', outs === 3 && /Pricing/.test(text) && /beta/.test(text) && /Try it/.test(text) && /from its left/.test(text), text.slice(0, 900));
+  await fs.writeFile(path.join(OUT, 'pull-edits.txt'), text);
+
+  // 7. close and reopen: what you pulled out stays out, and the guides come back on top
+  for (let i = 0; i < 4 && (await page.evaluate(() => !!document.querySelector('precise-dimension'))); i++) {
+    await key(page, 'Escape');
+    await sleep(250);
+  }
+  await sleep(500);
+  const closed = await state('.card .cta');
+  await ext.triggerAction(page);
+  await sleep(1900);
+  await clickUI(page, '.btn.change');
+  await sleep(700);
+  const again = await state('.card .cta');
+  check('closing keeps the edits; reopening puts the guides back on top', closed.out && again.out && again.hostTop && again.hostOpen, JSON.stringify({ closed: closed.out, again }));
+
+  // 8. reset puts everything back in its box
+  await clickUI(page, '.split.undo .half.r', { hoverFirst: '.split.undo' });
+  await sleep(900);
+  const fin = await page.evaluate(() => ({
+    open: document.querySelectorAll(':popover-open:not(precise-dimension)').length,
+    pop: document.querySelectorAll('[popover]:not(precise-dimension)').length,
+    styled: [...document.querySelectorAll('body *')].filter((e) => e.hasAttribute('style')).map((e) => `${e.tagName.toLowerCase()}.${e.className} [${e.getAttribute('style')}]`),
+  }));
+  const menuF = await R('.menu');
+  const gF = await R('.tag', 2);
+  check('reset puts everything back in its box, leaving nothing behind', fin.open === 0 && fin.pop === 0 && fin.styled.length === 0 && near(menuF.w, menu0.w, 0.5) && near(gF.x, g0.x, 0.5), JSON.stringify(fin));
+  const errs = ourErrors(world, logs);
+  check('no errors (pull)', !errs.length, errs.join(' | '));
   await page.close();
 }
 
@@ -1060,6 +1457,7 @@ const SITES = [
 
 async function sitesScenario() {
   for (const [name, target] of SITES) {
+    if (process.env.PD_SITE && process.env.PD_SITE !== name) continue; // PD_SITE=github tests one site
     console.log(`  -- ${name}`);
     let page;
     try {
@@ -1081,6 +1479,24 @@ async function sitesScenario() {
       const hov = await S(world, `return A.hover ? (A.hover.el ? A.hover.el.tagName.toLowerCase() : 'box') : null;`);
       await shot(page, `site-${name}-2-hover`);
 
+      // detail levels: Blocks and Sections still find sensible things on real pages
+      const drawnAll = await S(world, `return A.drawn;`);
+      await key(page, 'l');
+      await sleep(400);
+      const drawnBlocks = await S(world, `return A.drawn;`);
+      await shot(page, `site-${name}-2b-blocks`);
+      await key(page, 'l');
+      await sleep(400);
+      const lv = await S(world, levelCount);
+      const drawnSec = await S(world, `return A.drawn;`);
+      await page.mouse.move(640, 440, { steps: 3 });
+      await sleep(300);
+      await shot(page, `site-${name}-2c-sections`);
+      await key(page, 'l');
+      await sleep(250);
+      // (on a one-box page like example.com, the one block is also the one section)
+      check(`${name}: Blocks and Sections show fewer, bigger boxes`, drawnAll > drawnBlocks && drawnBlocks >= drawnSec && drawnSec >= 1 && lv[2] >= 1 && lv[2] <= 80, `on screen ${drawnAll} → ${drawnBlocks} → ${drawnSec}; levels ${JSON.stringify(lv)}`);
+
       // far down the page there should still be boxes (big pages are scanned around the screen)
       const H = await page.evaluate(() => document.documentElement.scrollHeight);
       if (H > 4000) {
@@ -1098,7 +1514,9 @@ async function sitesScenario() {
       await sleep(700);
       await page.mouse.click(640, 430);
       await sleep(200);
-      const before = await S(world, `const s = A.sel[0]; if (!s || !s.el) return null; const r = s.el.getBoundingClientRect(); return { tag: s.el.tagName.toLowerCase(), x: r.left, y: r.top, w: r.width, h: r.height };`);
+      // remember what was clicked: if the drag grabs the box around it instead (a canvas inside
+      // a wrapper of its own, say), it still has to move along with the mouse
+      const before = await S(world, `const s = A.sel[0]; if (!s || !s.el) return null; window.__pdPicked = s.el; const r = s.el.getBoundingClientRect(); return { tag: s.el.tagName.toLowerCase(), x: r.left, y: r.top, w: r.width, h: r.height };`);
       if (before) {
         // grab it somewhere inside (away from any resize handle), like a person would
         const vis = { x: Math.max(0, before.x), y: Math.max(0, before.y) };
@@ -1122,12 +1540,12 @@ async function sitesScenario() {
         }
         await drag(page, gx, gy, gx + 40, gy + 30, { meta: true });
         await sleep(250);
-        const after = await S(world, `const r = A.sel[0].el.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height };`);
+        const after = await S(world, `const r = window.__pdPicked.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height };`);
         check(`${name}: drag moves the clicked ${before.tag}`, near(after.x - before.x, 40, 1) && near(after.y - before.y, 30, 1) && near(after.w, before.w, 1), `Δ ${(after.x - before.x).toFixed(1)}, ${(after.y - before.y).toFixed(1)}`);
         await shot(page, `site-${name}-3-moved`);
         await key(page, 'z', ['Meta']);
         await sleep(250);
-        const back = await S(world, `const r = A.sel[0] ? A.sel[0].el.getBoundingClientRect() : null; return r && { x: r.left, y: r.top };`);
+        const back = await S(world, `const e = window.__pdPicked; const r = e && e.isConnected ? e.getBoundingClientRect() : null; return r && { x: r.left, y: r.top };`);
         check(`${name}: undo puts it back`, back && near(back.x, before.x, 1) && near(back.y, before.y, 1));
       } else {
         check(`${name}: click in change mode selects something`, false, `hover was ${hov}`);
@@ -1212,7 +1630,7 @@ async function insecureScenario() {
   await page.close();
 }
 
-const scenarios = { measure: measureScenario, wave: waveScenario, draw: drawScenario, change: changeScenario, dense: denseScenario, climb: climbScenario, canvas: canvasScenario, capture: captureScenario, fullpage: fullpageScenario, lifecycle: lifecycleScenario, insecure: insecureScenario, sites: sitesScenario };
+const scenarios = { measure: measureScenario, wave: waveScenario, draw: drawScenario, change: changeScenario, dense: denseScenario, climb: climbScenario, detail: detailScenario, pull: pullScenario, canvas: canvasScenario, capture: captureScenario, fullpage: fullpageScenario, lifecycle: lifecycleScenario, insecure: insecureScenario, sites: sitesScenario };
 export { scenarios, setup, S, shot, check, near, ourErrors, browser, url, OUT, DL };
 
 for (const [name, fn] of Object.entries(scenarios)) {

@@ -7,11 +7,11 @@ import { draw, resizeCanvas, startWave } from './render.js';
 import { buildUI, showBars, hideBars, sync, frameUI, showHint } from './ui.js';
 import { setupLayer, attachInteract, detachInteract } from './interact.js';
 import { setSelection } from './items.js';
-import { getRec } from './edits.js';
+import { getRec, hasFree, raiseHost } from './edits.js';
 import { loadPrefs } from './prefs.js';
 import { CSS } from './styles.js';
 
-const VERSION = '0.2.0';
+const VERSION = '1.0.0';
 // eslint-disable-next-line no-undef
 const BUILD = typeof __PD_BUILD__ === 'string' ? __PD_BUILD__ : VERSION; // set by build.mjs
 let mo = null;
@@ -187,6 +187,7 @@ function open() {
   clearTimeout(closeTimer);
   if (!app.host) build();
   if (!app.host.isConnected) (document.documentElement || document.body).appendChild(app.host);
+  if (hasFree()) raiseHost(); // things you pulled out float in the top layer: stay above them
   const wasClosing = st.closing;
   st.open = true;
   st.closing = false;

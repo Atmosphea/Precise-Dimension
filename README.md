@@ -8,7 +8,9 @@ AI tools can see now, so a good layout screenshot matters more than ever. This i
 
 ---
 
-Click the icon on any web page and every box shows its size, in units you can say to your coding agent ("make the navbar 13vh tall and the logo 10vw wide"). You can also draw boxes, move and resize things like in Photoshop, and copy all of it as a screenshot (the visible screen or the whole page) or as plain words.
+Click the icon on any web page and every box shows its size, in units you can say to your coding agent ("make the navbar 13vh tall and the logo 10vw wide"). You can also draw boxes, move and resize things like in Photoshop (even drag them out of the box they sit in), and copy all of it as a screenshot (the visible screen or the whole page) or as plain words.
+
+There's also a quicker way to install it: download `precise-dimension-1.0.0.zip` from the [latest release](https://github.com/Atmosphea/Precise-Dimension/releases/latest), unzip it, and choose that folder in step 4 below.
 
 - `extension/` holds the browser extension, which is what this README is about.
 - The other folders hold the original Precise Dimension web app (Next.js, exported from v0).
@@ -42,7 +44,7 @@ Click the icon, or press **Alt+Shift+D** (Option+Shift+D on a Mac). A wave rippl
 | screenshot | Hover it and it splits in two: **left half copies**, **right half downloads** what you see right now. The screen flashes white like a camera and a check mark shows it worked |
 | full page | Same split, but for the whole page from top to bottom, as one tall picture (see below) |
 | change mode | Turns everything purple so you can move and resize the page itself (see below) |
-| eye | Hide or show all the guides. Shortcut: **H** |
+| eye + level | Two halves. The **eye** hides or shows all the guides (**H**). The **level** next to it changes how much detail you see: **All** (every box, down to each word), then **Blocks** (cards, columns, buttons, pictures), then **Sections** (just the big parts: header, sections, sidebar, footer). Hovering and clicking follow the level, so at Sections a click picks a whole section. Shortcut: **L** (Shift+L goes back) |
 
 Screenshots include your drawings and the size labels (hide the guides first if you only want the drawings). On pages that don't allow copying (plain `http://` sites that aren't localhost), the screenshot downloads instead.
 
@@ -68,9 +70,10 @@ Treat the page like a Photoshop file. Moving or resizing one thing never pushes 
 
 - **Hover** to see what you'd pick: it gets a white halo and a bold outline, plus small inward-pointing arrows on the nearest edges. In crowded spots (toolbars, rows of tags, icon grids) the ring of arrows steps aside. Only the edge right under your mouse lights up, with one handle that follows your mouse along it, ready to drag. Inside something you've already picked, a drag moves the whole thing instead of grabbing an edge inside it.
 - **Click** to select the thing under the mouse (four corners appear). **Shift-click** to add more things.
-- **Ctrl-click** (Ctrl or ⌘ on a Mac) to pick the box around it. Keep Ctrl-clicking to climb one level at a time: icon → its card → the row of cards. Hold Ctrl while hovering to preview what you'd get.
-- **Ctrl+Shift-click** picks everything like it: every card in the grid, every button in the menu (things that share the same class). Then W A S D or a drag changes them all together.
+- **Double-click** to pick the box around it, **triple-click** for the box around that, and **quadruple-click** for one more: icon → its card → the row of cards. **Alt-click** (Option-click on a Mac) climbs the same way, one level per click. Hold Alt (Option) while hovering to preview what you'd get. Then drag from inside it to move the whole box.
+- **Alt+Shift-click** (Option+Shift-click on a Mac) picks everything like it: every card in the grid, every button in the menu (things that share the same class). Then W A S D or a drag changes them all together.
 - **Drag** to move. Things snap to nearby edges and centres (pink lines). Hold **⌘** (Ctrl on Windows) to switch snapping off.
+- **Drag it out of its box.** Drag something past the edge of the box it sits in (a link out of a menu, a button out of a card, a word out of a sticky header) and it comes out. It floats above everything, nothing cuts it off, and the box closes the gap behind it. Drag it back over its box and it slides back into its own spot.
 - **Drag an edge arrow or a corner** to resize.
 - **W / S** make it shorter or taller and **A / D** narrower or wider, about 5% per press (with Shift, 1px at a time).
 - **Arrow keys** nudge by 1px (with Shift, 10px).
@@ -87,7 +90,7 @@ The purple toolbar that rolls out under the white one:
 | align | Align edges or centres and even out spacing |
 | copy as text | Copies a plain-English list of everything you changed, with sizes and CSS selectors, ready to paste to your coding agent |
 | undo | Hover to split: **undo** the last step, or **reset all** to put the page back exactly as it was |
-| eye | Hide or show the guides |
+| eye + level | The same as on the white toolbar |
 
 ### Drawing boxes and the canvas
 
@@ -97,7 +100,7 @@ The purple toolbar that rolls out under the white one:
 
 ### Esc
 
-Esc steps back one thing at a time: stops a full-page screenshot or a drag, closes a menu, clears the selection, leaves the canvas, leaves change mode, then turns the tool off.
+Esc steps back one thing at a time: stops a full-page screenshot or a drag (whatever you were dragging goes back where it was), closes a menu, clears the selection, leaves the canvas, leaves change mode, then turns the tool off.
 
 ## Notes and limits
 
@@ -108,6 +111,8 @@ Esc steps back one thing at a time: stops a full-page screenshot or a drag, clos
 - Full-page screenshots stop if you switch tabs while they're being taken, because the browser only lets extensions photograph the tab you're looking at. They go up to 150 screens (or 250,000 pixels) tall.
 - Very tall full-page pictures may be too big for the clipboard. If copying fails, the picture downloads instead.
 - If your computer is set to reduce motion, the opening wave is skipped and the flash is softer.
+- Some things can't be dragged out of their box: table cells and rows, parts of an SVG drawing, and anything inside an iframe. They still move, but their box may cut them off.
+- Pages that animate things with their own scripts (GitHub's mascot, for example) can move those things back while you work on them.
 
 ## For developers
 
@@ -117,7 +122,7 @@ npm install
 node build.mjs            # builds extension/build (the folder you load in the browser)
 node build.mjs --watch    # rebuilds on every save
 node test/run.mjs         # end-to-end tests in a real Chromium; screenshots land in extension/test-output
-node test/run.mjs fullpage   # just one group (measure, wave, draw, change, dense, climb, canvas, capture, fullpage, …)
+node test/run.mjs fullpage   # just one group (measure, wave, draw, change, dense, climb, detail, pull, canvas, capture, fullpage, …)
 node test/run.mjs sites   # the same checks on six live websites (needs internet)
 ```
 

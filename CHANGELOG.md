@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.0 (2026-11-21)
+
+**Drag anything anywhere**
+- In change mode, things can now leave the box they sit in. Drag a link out of a menu, a button out of a card or a word out of a sticky header, and it comes out and floats above everything. Nothing cuts it off any more.
+- The box it came from closes the gap behind it, the way a design tool does.
+- Drag it back over its box and it slides back into its own spot. Drag on past the box and it comes out again.
+- Undo, redo, Esc during a drag and reset all put things back exactly. Things you pulled out stay out when you turn the tool off and on again.
+- Copied edits say it in words, for example: *take it out of List "Product Pricing…" (`header > ul.menu`) so the rest close up the gap, and put it over Main…, 604px from its left and 249px from its top*.
+
+**Picking the box around something**
+- **Double-click** picks the box around what you clicked. **Triple-click** goes one level further, and **quadruple-click** one more.
+- **Alt-click** (Option-click on a Mac) climbs the same way, one level per click. It replaces Ctrl-click, which on a Mac also opens the right-click menu. Ctrl-click and ⌘-click are plain clicks now.
+- **Alt+Shift-click** (Option+Shift-click) picks everything like it. This used to be Ctrl+Shift-click.
+- Once something is picked, a drag from anywhere inside its outline moves it, even from a spot where the page only reports the box around it, like the gap next to a link that wraps onto two lines.
+
+**Detail levels**
+- The eye button has a second half that changes how much detail you see. **All** shows every box, down to each word. **Blocks** shows cards, columns, buttons and pictures. **Sections** shows just the big parts: header, sections, sidebar, footer.
+- Shortcut: **L** (Shift+L goes back).
+- Hovering, clicking, snapping and climbing all follow the level. At Sections, a click picks a whole section.
+- The eye half still hides or shows everything (**H**). The level is remembered next time.
+
+**Fixes**
+- If you grab something while it's still sliding into place, it's measured where it really is.
+- Reset and screenshots now leave the page's code exactly as it was.
+
 ## 0.2.0 (2026-11-21)
 
 **Opening**
